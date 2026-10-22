@@ -402,6 +402,7 @@ func TestCreateSnapshotDefaultsToTemplateKind(t *testing.T) {
 }
 
 func TestCreateCheckpointCommitsNodeLocalCache(t *testing.T) {
+	requireNativeCacheInstallation(t)
 	fixture, _ := newSnapshotFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
 

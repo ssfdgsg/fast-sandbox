@@ -44,14 +44,15 @@ Driver and Agent share advisory `flock` files in
 including during cache eviction, so every process continues locking the
 same inode. Deploy the updated Driver and Agent together. Native runtime
 support already targets Linux; atomic installation requires filesystem
-support for `RENAME_NOREPLACE`.
+support for `RENAME_NOREPLACE`. Other platforms compile with a helper that
+skips local installation.
 
 | Operation | Lock lifetime |
 | --- | --- |
 | Agent pull / repair | Exclusive, context-cancellable wait; check cache again after acquiring |
 | Snapshot cache installation | Exclusive, nonblocking; busy means skip |
 | Driver restore | Shared, nonblocking acquisition; held through VM restore and durable state creation |
-| Agent cache inspection | Shared, nonblocking acquisition; busy means not ready |
+| Agent cache inspection | Shared, wait for writers; service reads use the request context for cancellation |
 | GC | Exclusive, nonblocking; rescan durable references before unlinking |
 
 GC derives the effective restore reference from Sandbox state, including

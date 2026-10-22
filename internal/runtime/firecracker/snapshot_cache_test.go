@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,6 +17,13 @@ import (
 	"fast-sandbox/internal/runtime/firecracker/agent"
 	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
+
+func requireNativeCacheInstallation(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("native cache installation requires Linux RENAME_NOREPLACE")
+	}
+}
 
 func stageNativeSnapshot(t *testing.T, root, rootfs string) (string, string) {
 	t.Helper()
@@ -35,6 +43,7 @@ func stageNativeSnapshot(t *testing.T, root, rootfs string) (string, string) {
 }
 
 func TestPublishedCacheCommitAndConflict(t *testing.T) {
+	requireNativeCacheInstallation(t)
 	root := t.TempDir()
 	driver := &Driver{config: firecrackerConfigForTest(t, root)}
 	staging, digest := stageNativeSnapshot(t, root, "original-rootfs")
@@ -120,6 +129,9 @@ func TestPublishedCacheSkipsAndCleansStaging(t *testing.T) {
 func TestCreateTemplateSnapshotPrewarm(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
+			if enabled {
+				requireNativeCacheInstallation(t)
+			}
 			fixture, _ := newSnapshotFixture(t)
 			if enabled {
 				t.Setenv(snapshotPrewarmEnv, "true")

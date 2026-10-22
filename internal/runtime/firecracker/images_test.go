@@ -215,6 +215,7 @@ func TestImageGCLoopRunsIndependently(t *testing.T) {
 }
 
 func TestGarbageCollectFullSnapshotAndActiveReader(t *testing.T) {
+	requireNativeCacheInstallation(t)
 	root := t.TempDir()
 	driver := &Driver{config: firecrackerConfigForTest(t, root)}
 	staging, digest := stageNativeSnapshot(t, root, "rootfs")
@@ -236,6 +237,7 @@ func TestGarbageCollectFullSnapshotAndActiveReader(t *testing.T) {
 }
 
 func TestGarbageCollectPinsCheckpointRestoreReference(t *testing.T) {
+	requireNativeCacheInstallation(t)
 	root := t.TempDir()
 	driver := &Driver{config: firecrackerConfigForTest(t, root)}
 	staging, digest := stageNativeSnapshot(t, root, "checkpoint-rootfs")

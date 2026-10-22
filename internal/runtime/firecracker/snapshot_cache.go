@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"syscall"
 
-	"golang.org/x/sys/unix"
-
 	"fast-sandbox/internal/artifacts"
 	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
@@ -138,11 +136,11 @@ func (d *Driver) commitPublishedCache(ctx context.Context, reference, digest, st
 	// Unlike Rename, NOREPLACE also refuses an existing empty directory.
 	// A reader sees either no entry or the entire ready set. This provides
 	// atomic visibility, not crash durability; the remote set is authoritative.
-	if err := unix.Renameat2(unix.AT_FDCWD, tmp, unix.AT_FDCWD, cacheDir, unix.RENAME_NOREPLACE); err != nil {
-		if errors.Is(err, unix.EEXIST) {
+	if err := installSnapshotCache(tmp, cacheDir); err != nil {
+		if errors.Is(err, os.ErrExist) {
 			return cacheSkippedConflict, nil
 		}
-		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP) {
+		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.EOPNOTSUPP) {
 			return cacheSkippedFS, nil
 		}
 		return cacheCommitFailed, err

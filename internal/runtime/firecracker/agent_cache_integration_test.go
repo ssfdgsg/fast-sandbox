@@ -36,6 +36,9 @@ func TestAgentPullFeedsDriverCache(t *testing.T) {
 
 func testAgentPullFeedsDriverCache(t *testing.T, mode string) {
 	t.Helper()
+	if mode == "prewarm-then-evict" {
+		requireNativeCacheInstallation(t)
+	}
 	const (
 		image       = "registry.example.com/sandbox:v1.0.21"
 		bucket      = "sandbox-images"
