@@ -2,11 +2,15 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
 
 // TestFileMatchesSizeFastPath verifies the stat-first size check: a file
@@ -41,6 +45,66 @@ func TestFileMatchesSizeFastPath(t *testing.T) {
 	match, err = fileMatches(path, file)
 	require.NoError(t, err)
 	require.True(t, match)
+}
+
+func TestCachedManifestDigestWaitsForWriter(t *testing.T) {
+	root, image := t.TempDir(), "contended-template"
+	dir := imageDir(root, image)
+	require.NoError(t, os.MkdirAll(dir, cacheDirMode))
+	payload := testManifest(map[string][]byte{
+		"rootfs.ext4": []byte("rootfs"), "vmstate.snap": []byte("state"), "memory.snap": []byte("memory"),
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(dir, manifestName), payload, cacheFileMode))
+	lock, err := imagecache.Acquire(context.Background(), root, imageKey(image), true, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lock.Close() })
+	type result struct {
+		digest string
+		found  bool
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		digest, found, err := CachedManifestDigest(root, image)
+		done <- result{digest, found, err}
+	}()
+	select {
+	case result := <-done:
+		t.Fatalf("manifest read returned while the cache was busy: %+v", result)
+	case <-time.After(60 * time.Millisecond):
+	}
+	require.NoError(t, lock.Close())
+	select {
+	case result := <-done:
+		require.NoError(t, result.err)
+		require.True(t, result.found)
+		require.Equal(t, sha256Hex(payload), result.digest)
+	case <-time.After(5 * time.Second):
+		t.Fatal("manifest read did not complete after the writer released the cache")
+	}
+}
+
+func TestCacheReadWaitHonorsContext(t *testing.T) {
+	root, image := t.TempDir(), "busy-template"
+	lock, err := imagecache.Acquire(context.Background(), root, imageKey(image), true, false)
+	require.NoError(t, err)
+	defer lock.Close()
+	for name, read := range map[string]func(context.Context) error{
+		"readiness": func(ctx context.Context) error {
+			_, err := ImageReadyContext(ctx, root, image)
+			return err
+		},
+		"manifest": func(ctx context.Context) error {
+			_, _, err := CachedManifestDigestContext(ctx, root, image)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			require.ErrorIs(t, read(ctx), context.DeadlineExceeded)
+		})
+	}
 }
 
 // TestCacheComplete checks the committed-pull predicate: any missing,

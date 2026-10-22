@@ -63,10 +63,14 @@ func ImageRootfsPath(stateRoot, image string) string {
 // local cache: the commit-point manifest plus a native file set whose
 // digests match.
 func ImageReady(stateRoot, image string) (bool, error) {
-	lock, err := imagecache.Acquire(context.Background(), stateRoot, imageKey(image), false, false)
-	if errors.Is(err, imagecache.ErrBusy) {
-		return false, nil
-	}
+	return ImageReadyContext(context.Background(), stateRoot, image)
+}
+
+// ImageReadyContext waits for an active cache writer before checking the
+// committed files. Contention is not a cache miss. Service requests pass
+// their context so cancellation interrupts the wait.
+func ImageReadyContext(ctx context.Context, stateRoot, image string) (bool, error) {
+	lock, err := imagecache.Acquire(ctx, stateRoot, imageKey(image), false, true)
 	if err != nil {
 		return false, err
 	}
@@ -79,10 +83,14 @@ func ImageReady(stateRoot, image string) (bool, error) {
 // artifactDigest the pull verified, so callers can trust it without a
 // network request. An image without a committed manifest reports false.
 func CachedManifestDigest(stateRoot, image string) (string, bool, error) {
-	lock, err := imagecache.Acquire(context.Background(), stateRoot, imageKey(image), false, false)
-	if errors.Is(err, imagecache.ErrBusy) {
-		return "", false, nil
-	}
+	return CachedManifestDigestContext(context.Background(), stateRoot, image)
+}
+
+// CachedManifestDigestContext reads the manifest after waiting for any
+// active writer. A busy entry never reports a missing manifest; a cancelled
+// request returns its context error instead.
+func CachedManifestDigestContext(ctx context.Context, stateRoot, image string) (string, bool, error) {
+	lock, err := imagecache.Acquire(ctx, stateRoot, imageKey(image), false, true)
 	if err != nil {
 		return "", false, err
 	}

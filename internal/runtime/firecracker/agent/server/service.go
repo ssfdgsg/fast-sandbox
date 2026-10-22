@@ -106,7 +106,7 @@ func (s *Service) PinImage(ctx context.Context, request agentprotocol.PinImageRe
 		if err := s.ensureImage(ctx, request.Image); err != nil {
 			return "", err
 		}
-		manifestDigest, ok, err := agentpull.CachedManifestDigest(s.stateRoot, request.Image)
+		manifestDigest, ok, err := agentpull.CachedManifestDigestContext(ctx, s.stateRoot, request.Image)
 		if err != nil {
 			return "", err
 		}
@@ -155,7 +155,7 @@ func (s *Service) LeaseDevices(ctx context.Context, request agentprotocol.LeaseD
 	}
 	return agentprotocol.LeaseDevicesResponse{
 		LeaseID: lease.LeaseID, RootfsDev: lease.RootfsDev, MemDev: lease.MemDev,
-		ManifestDigest: s.manifestDigestFor(lease.Image),
+		ManifestDigest: s.manifestDigestFor(ctx, lease.Image),
 	}, nil
 }
 
@@ -219,8 +219,8 @@ func (s *Service) PublishImage(ctx context.Context, request agentprotocol.Publis
 }
 
 // manifestDigestFor re-reads the committed manifest digest of an image.
-func (s *Service) manifestDigestFor(image string) string {
-	digest, ok, err := agentpull.CachedManifestDigest(s.stateRoot, image)
+func (s *Service) manifestDigestFor(ctx context.Context, image string) string {
+	digest, ok, err := agentpull.CachedManifestDigestContext(ctx, s.stateRoot, image)
 	if err != nil || !ok {
 		return ""
 	}
@@ -230,7 +230,7 @@ func (s *Service) manifestDigestFor(image string) string {
 // ensureImage pulls the image unless the cache already holds a committed
 // pull. A missing published index maps to ErrImageNotReady for the driver.
 func (s *Service) ensureImage(ctx context.Context, image string) error {
-	ready, err := agentpull.ImageReady(s.stateRoot, image)
+	ready, err := agentpull.ImageReadyContext(ctx, s.stateRoot, image)
 	if err != nil {
 		return err
 	}
@@ -240,7 +240,7 @@ func (s *Service) ensureImage(ctx context.Context, image string) error {
 	if err := s.pull.PullImage(ctx, s.stateRoot, image); err != nil {
 		return err
 	}
-	ready, err = agentpull.ImageReady(s.stateRoot, image)
+	ready, err = agentpull.ImageReadyContext(ctx, s.stateRoot, image)
 	if err != nil {
 		return err
 	}
@@ -254,7 +254,7 @@ func (s *Service) ensureImage(ctx context.Context, image string) error {
 // ref + digest, e.g. the canonical checkpoint reference) unless the cache
 // already holds the complete committed set.
 func (s *Service) ensureCheckpoint(ctx context.Context, reference, manifestRef, artifactDigest string) error {
-	ready, err := agentpull.ImageReady(s.stateRoot, reference)
+	ready, err := agentpull.ImageReadyContext(ctx, s.stateRoot, reference)
 	if err != nil {
 		return err
 	}
@@ -264,7 +264,7 @@ func (s *Service) ensureCheckpoint(ctx context.Context, reference, manifestRef, 
 	if err := s.pull.PullCheckpoint(ctx, s.stateRoot, reference, manifestRef, artifactDigest); err != nil {
 		return err
 	}
-	ready, err = agentpull.ImageReady(s.stateRoot, reference)
+	ready, err = agentpull.ImageReadyContext(ctx, s.stateRoot, reference)
 	if err != nil {
 		return err
 	}
