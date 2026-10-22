@@ -63,7 +63,7 @@ func (f *snapshotAgentFake) PublishImage(_ context.Context, _, kind, key, dir st
 			return PublishOutcome{}, errors.New("incomplete staging set: " + name)
 		}
 	}
-	return PublishOutcome{ManifestRef: "s3://bucket/publish/0123456789abcdef/manifest.json", ArtifactDigest: "digest-" + key}, nil
+	return PublishOutcome{ManifestRef: "s3://bucket/publish/0123456789abcdef/manifest.json", ArtifactDigest: artifacts.SHA256Of(payload)}, nil
 }
 
 // withSnapshotSpill points the driver at a per-test spill root.
@@ -83,7 +83,7 @@ func TestCreateSnapshotSpillsDumpOutsideStateRoot(t *testing.T) {
 		SandboxID: sandboxID, SnapshotID: "snap-1", TemplateName: "app-v2",
 	})
 	require.NoError(t, err)
-	require.Equal(t, "digest-app-v2", result.ArtifactDigest)
+	require.True(t, validImageDigest(result.ArtifactDigest))
 
 	// The dump targeted the spill area (absolute paths in direct mode).
 	require.Len(t, fixture.server.snapshotDumps, 1)
@@ -159,6 +159,7 @@ func TestCreateSnapshotFallsBackWhenSpillUnavailable(t *testing.T) {
 
 func newSnapshotFixture(t *testing.T) (*driverFixture, *snapshotAgentFake) {
 	t.Helper()
+	t.Setenv(snapshotPrewarmEnv, "")
 	fixture := newSnapshotDriverFixture(t)
 	agent := &snapshotAgentFake{}
 	fixture.driver.agentSocket = "/run/test/agent.sock"
@@ -185,7 +186,7 @@ func TestCreateSnapshotDumpsPublishesAndResumes(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "snap-1", result.SnapshotID)
-	require.Equal(t, "digest-app-v2", result.ArtifactDigest)
+	require.True(t, validImageDigest(result.ArtifactDigest))
 	require.Contains(t, result.ManifestRef, "s3://bucket/publish/")
 	require.Greater(t, result.SizeBytes, int64(0))
 
