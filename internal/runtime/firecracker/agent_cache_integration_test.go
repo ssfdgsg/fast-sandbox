@@ -8,8 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -23,6 +27,15 @@ import (
 // change, and the per-build digest namespace and file mapping
 // (rootfs.ext4 -> rootfs.img) match the published layout.
 func TestAgentPullFeedsDriverCache(t *testing.T) {
+	for _, mode := range []string{"cold", "prewarm-then-evict", "concurrent-pull"} {
+		t.Run(mode, func(t *testing.T) {
+			testAgentPullFeedsDriverCache(t, mode)
+		})
+	}
+}
+
+func testAgentPullFeedsDriverCache(t *testing.T, mode string) {
+	t.Helper()
 	const (
 		image       = "registry.example.com/sandbox:v1.0.21"
 		bucket      = "sandbox-images"
@@ -59,7 +72,18 @@ func TestAgentPullFeedsDriverCache(t *testing.T) {
 	require.NoError(t, err)
 	objects["index/"+imageKey(image)+".json"] = indexBytes
 
+	var requests atomic.Int64
+	memoryStarted, releaseMemory := make(chan struct{}), make(chan struct{})
+	var blockOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(releaseMemory) }) }
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if mode == "concurrent-pull" && strings.HasSuffix(r.URL.Path, "/memory.snap") {
+			blockOnce.Do(func() {
+				close(memoryStarted)
+				<-releaseMemory
+			})
+		}
 		content, ok := objects[strings.TrimPrefix(r.URL.Path, "/"+bucket+"/"+storePrefix+"/")]
 		if !ok {
 			http.NotFound(w, nil)
@@ -68,13 +92,65 @@ func TestAgentPullFeedsDriverCache(t *testing.T) {
 		_, _ = w.Write(content)
 	}))
 	defer server.Close()
+	defer unblock()
 
 	client, err := agent.NewClient("s3://"+bucket+"/"+storePrefix,
 		registryconfig.Credential{Host: server.URL, Username: "ak", Password: "sk"})
 	require.NoError(t, err)
 
 	stateRoot := t.TempDir()
+	if mode == "concurrent-pull" {
+		pulled := make(chan error, 1)
+		go func() { pulled <- client.PullImage(context.Background(), stateRoot, image) }()
+		select {
+		case <-memoryStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("pull did not reach memory download")
+		}
+		driver := &Driver{config: firecrackerConfigForTest(t, stateRoot)}
+		staging, digest := stageNativeSnapshot(t, stateRoot, "new-snapshot")
+		outcome, err := driver.commitPublishedCache(context.Background(), image, digest, staging)
+		require.NoError(t, err)
+		require.Equal(t, cacheSkippedBusy, outcome)
+		require.NoDirExists(t, staging)
+		removed, err := garbageCollectImages(stateRoot, 0, nil)
+		require.NoError(t, err)
+		require.Empty(t, removed, "GC must not remove the partial set owned by the pull")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
+		require.ErrorIs(t, client.PullImage(ctx, stateRoot, image), context.DeadlineExceeded)
+		unblock()
+		require.NoError(t, <-pulled)
+	}
+	if mode == "prewarm-then-evict" {
+		staging, err := os.MkdirTemp(stateRoot, "snapshot-*")
+		require.NoError(t, err)
+		for name, content := range artifacts {
+			require.NoError(t, os.WriteFile(filepath.Join(staging, name), content, 0o640))
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(staging, "manifest.json"), manifestBytes, 0o640))
+		driver := &Driver{config: firecrackerConfigForTest(t, stateRoot)}
+		outcome, err := driver.commitPublishedCache(context.Background(), image, sha256HexTest(manifestBytes), staging)
+		require.NoError(t, err)
+		require.Equal(t, cacheCommitted, outcome)
+		require.NoError(t, client.PullImage(context.Background(), stateRoot, image))
+		require.Zero(t, requests.Load(), "a prewarmed image needs no metadata or artifact GET")
+		first, second := t.TempDir(), t.TempDir()
+		firstRoot, err := prepareInstanceRootfs(stateRoot, image, first)
+		require.NoError(t, err)
+		secondRoot, err := prepareInstanceRootfs(stateRoot, image, second)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(firstRoot, []byte("instance mutation"), 0o640))
+		content, err := os.ReadFile(secondRoot)
+		require.NoError(t, err)
+		require.Equal(t, artifacts["rootfs.ext4"], content, "instances must have independent writable rootfs")
+		removed, err := garbageCollectImages(stateRoot, 0, nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{imageKey(image)}, removed)
+	}
 	require.NoError(t, client.PullImage(context.Background(), stateRoot, image))
+
+	require.Positive(t, requests.Load(), "cold cache must fetch the published set")
 
 	// The driver's existing restore consumer resolves the pulled rootfs
 	// image under the shared cache layout.

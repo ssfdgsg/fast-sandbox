@@ -188,10 +188,20 @@ credentials) see the sections below.
   verbatim from the source image (they describe the vmstate lineage that
   restore validates). Only the template-name index is written — never a
   default `sha256(image)` key, which would pollute the golden image.
+- **Optional same-node prewarm**: set `FAST_SANDBOX_SNAPSHOT_PREWARM=true`
+  in the Fastlet process to retain a freshly published native template in
+  its local image cache. The default is disabled. Use a fresh `templateName`
+  for each version: an existing conflicting cache is preserved, and this
+  option does not refresh aliases. Installation moves the complete staged
+  set after remote publication, with no extra artifact download or full
+  copy. Busy entries, insufficient cache capacity and unsupported filesystem
+  operations skip prewarm; the published snapshot still succeeds. Cached
+  templates remain eligible for normal GC. Checkpoints retain their existing
+  best-effort caching regardless of this switch. See the
+  [implementation notes](../design/native-snapshot-prewarm.md) for locking,
+  cache accounting and validation boundaries.
 - **Follow-ups**: [#56](https://github.com/opensandbox-group/fast-sandbox/issues/56)
   diff snapshots (pause window proportional to dirty pages),
-  [#57](https://github.com/opensandbox-group/fast-sandbox/issues/57)
-  same-node prewarm of a freshly published set,
   [#61](https://github.com/opensandbox-group/fast-sandbox/issues/61) overlap
   the manifest hashing with the dump window (per-file SHA256 currently
   serializes ~15.5 s before the upload starts).

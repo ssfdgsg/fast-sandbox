@@ -11,8 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/artifacts"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
 
 func TestImageCachePathIsContentAddressed(t *testing.T) {
@@ -210,4 +212,46 @@ func TestImageGCLoopRunsIndependently(t *testing.T) {
 	time.Sleep(3 * driver.imageGCInterval)
 	_, err = os.Stat(filepath.Join(root, imageCacheDir, after))
 	require.NoError(t, err, "loop must stop when the driver is closed")
+}
+
+func TestGarbageCollectFullSnapshotAndActiveReader(t *testing.T) {
+	root := t.TempDir()
+	driver := &Driver{config: firecrackerConfigForTest(t, root)}
+	staging, digest := stageNativeSnapshot(t, root, "rootfs")
+	outcome, err := driver.commitPublishedCache(context.Background(), "template", digest, staging)
+	require.NoError(t, err)
+	require.Equal(t, cacheCommitted, outcome)
+	// Six rootfs bytes fit the quota; the complete snapshot does not.
+	// An active restore reader must still keep the cache alive.
+	lock, err := imagecache.Acquire(context.Background(), root, imageKey("template"), false, false)
+	require.NoError(t, err)
+	removed, err := garbageCollectImages(root, 6, nil)
+	require.NoError(t, err)
+	require.Empty(t, removed)
+	require.NoError(t, verifyRestorableImage(root, "template"))
+	require.NoError(t, lock.Close())
+	removed, err = garbageCollectImages(root, 6, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{imageKey("template")}, removed)
+}
+
+func TestGarbageCollectPinsCheckpointRestoreReference(t *testing.T) {
+	root := t.TempDir()
+	driver := &Driver{config: firecrackerConfigForTest(t, root)}
+	staging, digest := stageNativeSnapshot(t, root, "checkpoint-rootfs")
+	reference := artifacts.CheckpointReference(digest)
+	outcome, err := driver.commitPublishedCache(context.Background(), reference, digest, staging)
+	require.NoError(t, err)
+	require.Equal(t, cacheCommitted, outcome)
+	dir, err := ensureSandboxDir(root, "resumed")
+	require.NoError(t, err)
+	require.NoError(t, saveState(dir, &SandboxState{Config: fastletapi.RuntimeSandboxConfig{
+		Identity: fastletapi.SandboxIdentity{SandboxUID: "resumed"},
+		Spec: fastletapi.SandboxSpec{Image: "original-image", Restore: &fastletapi.RestoreSpec{
+			ArtifactDigest: digest, ManifestRef: "s3://bucket/manifest.json",
+		}},
+	}, Phase: PhaseRunning}))
+	removed, err := garbageCollectImages(root, 0, nil)
+	require.NoError(t, err)
+	require.Empty(t, removed, "a resumed VM pins its checkpoint rather than its original image")
 }
