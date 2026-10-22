@@ -5,16 +5,14 @@ package agent
 // index.artifactDigest before any artifact is pulled.
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+
+	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
 
 // manifestFile describes one published artifact.
-type manifestFile struct {
-	SHA256    string `json:"sha256"`
-	SizeBytes int64  `json:"sizeBytes"`
-}
+type manifestFile = imagecache.File
 
 // manifest is the consumer-side view of manifest.json; only the file list
 // is needed by the pull layer.
@@ -51,32 +49,18 @@ const (
 	manifestMemoryName  = "memory.snap"
 )
 
-// nativeArtifactNames maps published artifact names to the local cache
-// names. rootfs.ext4 is renamed to rootfs.img so
-// the existing resolveRootfsImage consumer needs no change; the rest keep
-// their published names. OverlayBD layers are deliberately absent: they
-// arrive with the overlaybd stage.
-var nativeArtifactNames = []struct{ publish, cache string }{
-	{"rootfs.ext4", nativeRootfsCacheName},
-	{manifestVMStateName, manifestVMStateName},
-	{manifestMemoryName, manifestMemoryName},
-}
-
 // nativeFiles validates that the manifest carries the complete native
 // artifact set and returns the mapping with their expected digests.
 func (m manifest) nativeFiles() ([]nativeFile, error) {
-	files := make([]nativeFile, 0, len(nativeArtifactNames))
-	for _, name := range nativeArtifactNames {
-		entry, ok := m.Files[name.publish]
-		if !ok {
-			return nil, fmt.Errorf("manifest is missing the %s artifact", name.publish)
-		}
-		if !validSHA256(entry.SHA256) {
-			return nil, fmt.Errorf("manifest artifact %s has an invalid sha256", name.publish)
-		}
+	native, err := imagecache.NativeFiles(m.Files)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]nativeFile, 0, len(native))
+	for _, file := range native {
 		files = append(files, nativeFile{
-			publish: name.publish, cache: name.cache,
-			sha256: entry.SHA256, sizeBytes: entry.SizeBytes,
+			publish: file.Published, cache: file.Cached,
+			sha256: file.SHA256, sizeBytes: file.SizeBytes,
 		})
 	}
 	return files, nil
@@ -84,13 +68,5 @@ func (m manifest) nativeFiles() ([]nativeFile, error) {
 
 // validSHA256 reports whether sum is a lowercase sha256 hex digest.
 func validSHA256(sum string) bool {
-	if len(sum) != sha256.Size*2 {
-		return false
-	}
-	for _, character := range sum {
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
-			return false
-		}
-	}
-	return true
+	return imagecache.ValidKey(sum)
 }

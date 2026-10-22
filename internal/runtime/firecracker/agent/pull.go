@@ -20,6 +20,7 @@ import (
 
 	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
+	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
 
 // Client pulls published Firecracker artifacts for an image reference into
@@ -155,8 +156,8 @@ func WithPeerGateway(base, routePrefix string) Option {
 //  6. write the local manifest as the commit point.
 //
 // The call is safe to race with a concurrent PullImage of the same image:
-// every write lands in a temporary file and renames into place only after
-// full verification, so no half-published state is ever observable.
+// a per-reference file lock serializes writers, including driver prewarm,
+// and protects the set from eviction during a pull.
 //
 // Idempotency semantics: a committed cache is returned without any network
 // request and is never refreshed for the same image reference. A publisher
@@ -167,6 +168,11 @@ func (c *Client) PullImage(ctx context.Context, stateRoot, image string) (result
 	if strings.TrimSpace(image) == "" {
 		return fmt.Errorf("%w: image reference is required", runtimecontract.ErrInvalidConfig)
 	}
+	lock, err := imagecache.Acquire(ctx, stateRoot, imageKey(image), true, true)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	dir := imageDir(stateRoot, image)
 	if complete, err := cacheComplete(dir); err != nil {
 		return err
@@ -226,6 +232,11 @@ func (c *Client) PullCheckpoint(ctx context.Context, stateRoot, reference, manif
 	if strings.TrimSpace(manifestRef) == "" || strings.TrimSpace(artifactDigest) == "" {
 		return fmt.Errorf("%w: checkpoint manifestRef and artifactDigest are required", runtimecontract.ErrInvalidConfig)
 	}
+	lock, err := imagecache.Acquire(ctx, stateRoot, imageKey(reference), true, true)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	dir := imageDir(stateRoot, reference)
 	if complete, err := cacheComplete(dir); err != nil {
 		return err

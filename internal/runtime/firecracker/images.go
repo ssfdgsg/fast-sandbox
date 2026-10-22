@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/klog/v2"
 
 	runtimecontract "fast-sandbox/internal/runtime/contract"
+	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
 
 // imageCacheDir holds content-addressed rootfs images:
@@ -79,6 +81,31 @@ func verifyRestorableImage(stateRoot, image string) error {
 	if _, _, err := resolveRestoreSnapshotFiles(stateRoot, image); err != nil {
 		return err
 	}
+	// Hand-seeded local images may have no artifact manifest. Published
+	// entries must have every advertised native artifact at the right size.
+	dir := filepath.Join(stateRoot, imageCacheDir, imageKey(image))
+	payload, err := os.ReadFile(filepath.Join(dir, snapshotManifestName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: read manifest: %v", ErrImageNotReady, err)
+	}
+	var document struct {
+		Files map[string]imagecache.File `json:"files"`
+	}
+	if err := json.Unmarshal(payload, &document); err != nil {
+		return fmt.Errorf("%w: decode manifest: %v", ErrImageNotReady, err)
+	}
+	if document.Files != nil {
+		files, err := imagecache.NativeFiles(document.Files)
+		if err == nil {
+			err = imagecache.CheckFiles(dir, files, false)
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrImageNotReady, err)
+		}
+	}
 	return nil
 }
 
@@ -95,7 +122,7 @@ func listCachedImages(stateRoot string) ([]string, error) {
 	}
 	images := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || !validImageDigest(entry.Name()) {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(base, entry.Name(), rootfsImageName)); err == nil {
@@ -165,21 +192,13 @@ func copyFile(source, target string) error {
 
 // defaultImageCacheLimitBytes bounds the converted-image cache. When the
 // cache exceeds it, the GC evicts unreferenced images in least-frequently-used
-// order. 20 GiB holds roughly a few dozen rootfs images.
+// order. The quota includes rootfs, memory, VM state and metadata logical bytes.
 const defaultImageCacheLimitBytes = 20 << 30
 
-// garbageCollectImages evicts cached rootfs images to keep the cache under
-// limitBytes. Candidates are images no managed Sandbox references; among them
-// the least frequently used (recorded in memory by the driver, not derived
-// from filesystem timestamps) are removed first, newest/unknown entries
-// counting as zero uses. References are read from the durable per-Sandbox
-// state, so a VM that died with its Fastlet still pins its image until its
-// state directory is removed. Reflink instance copies are independent once
-// created, so deleting a cache entry never affects a running VM. A Sandbox
-// whose state cannot be read aborts the whole collection: it might reference
-// an image, and the cost of keeping a few hundred MiB beats breaking a
-// recoverable Sandbox.
-func garbageCollectImages(stateRoot string, limitBytes int64, useCount map[string]int64) ([]string, error) {
+// referencedImages reads the effective restore references from durable
+// Sandbox state. An unreadable record aborts collection rather than risking
+// eviction of a recoverable VM's files.
+func referencedImages(stateRoot string) (map[string]struct{}, error) {
 	referenced := make(map[string]struct{})
 	directories, err := listSandboxDirs(stateRoot)
 	if err != nil {
@@ -197,7 +216,43 @@ func garbageCollectImages(stateRoot string, limitBytes int64, useCount map[strin
 			}
 			return nil, fmt.Errorf("read Sandbox state %s for image GC: %w", directory, err)
 		}
-		referenced[imageKey(state.Config.Spec.Image)] = struct{}{}
+		reference, err := restoreReference(state.Config.Spec)
+		if err != nil {
+			return nil, err
+		}
+		referenced[imageKey(reference)] = struct{}{}
+	}
+	return referenced, nil
+}
+
+// cachedImageBytes counts all regular files, including sparse logical
+// memory size. Logical quota and available filesystem blocks are different
+// measures: reflink/shared extents cannot be summed as physical usage.
+func cachedImageBytes(dir string) (int64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			return 0, err
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+	}
+	return total, nil
+}
+
+// garbageCollectImages enforces the logical-byte quota in LFU order.
+// Pulls and active restores are protected by locks; durable references are
+// checked again under each eviction lock, after any concurrent create.
+func garbageCollectImages(stateRoot string, limitBytes int64, useCount map[string]int64) ([]string, error) {
+	referenced, err := referencedImages(stateRoot)
+	if err != nil {
+		return nil, err
 	}
 	cached, err := listCachedImages(stateRoot)
 	if err != nil {
@@ -216,15 +271,15 @@ func garbageCollectImages(stateRoot string, limitBytes int64, useCount map[strin
 		if !validImageDigest(digest) {
 			continue
 		}
-		info, err := os.Stat(filepath.Join(stateRoot, imageCacheDir, digest, rootfsImageName))
+		size, err := cachedImageBytes(filepath.Join(stateRoot, imageCacheDir, digest))
 		if err != nil {
 			continue
 		}
-		total += info.Size()
+		total += size
 		if _, used := referenced[digest]; used {
 			continue
 		}
-		entries = append(entries, entry{digest: digest, bytes: info.Size(), uses: useCount[digest]})
+		entries = append(entries, entry{digest: digest, bytes: size, uses: useCount[digest]})
 	}
 	// Least-frequently-used first; ties resolve deterministically by digest.
 	sort.Slice(entries, func(i, j int) bool {
@@ -238,7 +293,28 @@ func garbageCollectImages(stateRoot string, limitBytes int64, useCount map[strin
 		if total <= limitBytes {
 			break
 		}
-		if err := os.RemoveAll(filepath.Join(stateRoot, imageCacheDir, candidate.digest)); err != nil {
+		lock, err := imagecache.Acquire(context.Background(), stateRoot, candidate.digest, true, false)
+		if errors.Is(err, imagecache.ErrBusy) {
+			continue
+		}
+		if err != nil {
+			return removed, err
+		}
+		// A create may have persisted a reference after the initial scan.
+		// It holds a shared lock until that state is visible, so this scan
+		// under the exclusive lock closes the scan/create/delete race.
+		current, err := referencedImages(stateRoot)
+		if err != nil {
+			_ = lock.Close()
+			return removed, err
+		}
+		if _, used := current[candidate.digest]; used {
+			_ = lock.Close()
+			continue
+		}
+		err = os.RemoveAll(filepath.Join(stateRoot, imageCacheDir, candidate.digest))
+		_ = lock.Close()
+		if err != nil {
 			return removed, err
 		}
 		total -= candidate.bytes

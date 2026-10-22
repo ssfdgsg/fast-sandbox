@@ -25,6 +25,7 @@ import (
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
+	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
 
 // bootPollInterval is the VM state polling interval after start/resume.
@@ -429,6 +430,17 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	if manager == nil {
 		return nil, fmt.Errorf("%w: firecracker requires the Fastlet network manager", ErrNetworkUnavailable)
 	}
+	// Hold the shared lock through snapshot/load and durable state creation.
+	// GC cannot unlink the restore files in this window, and a cold pull does
+	// not stall the boot worker: it reports not ready instead.
+	cacheLock, err := imagecache.Acquire(ctx, stateRoot, imageKey(restoreRef), false, false)
+	if errors.Is(err, imagecache.ErrBusy) {
+		return nil, fmt.Errorf("%w: %q is being updated", ErrImageNotReady, restoreRef)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer cacheLock.Close()
 
 	// Image readiness: a create whose image is not yet cached never blocks
 	// on the node-side pull. Fastlet routes cold creates through the

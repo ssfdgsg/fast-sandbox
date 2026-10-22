@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 
 	"k8s.io/klog/v2"
+
+	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
 
 const (
@@ -61,6 +63,14 @@ func ImageRootfsPath(stateRoot, image string) string {
 // local cache: the commit-point manifest plus a native file set whose
 // digests match.
 func ImageReady(stateRoot, image string) (bool, error) {
+	lock, err := imagecache.Acquire(context.Background(), stateRoot, imageKey(image), false, false)
+	if errors.Is(err, imagecache.ErrBusy) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer lock.Close()
 	return cacheComplete(imageDir(stateRoot, image))
 }
 
@@ -69,6 +79,14 @@ func ImageReady(stateRoot, image string) (bool, error) {
 // artifactDigest the pull verified, so callers can trust it without a
 // network request. An image without a committed manifest reports false.
 func CachedManifestDigest(stateRoot, image string) (string, bool, error) {
+	lock, err := imagecache.Acquire(context.Background(), stateRoot, imageKey(image), false, false)
+	if errors.Is(err, imagecache.ErrBusy) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	defer lock.Close()
 	dir := imageDir(stateRoot, image)
 	payload, err := os.ReadFile(filepath.Join(dir, manifestName))
 	if err != nil {
