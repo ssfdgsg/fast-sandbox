@@ -85,10 +85,11 @@ published manifest file sizes without adding a full checksum scan to each
 hot restore; it does not implement generic restore-error repair/retry.
 Agent journal pins/leases are not newly integrated into Driver GC.
 
-Real Firecracker/KVM recovery and multi-GiB latency/space measurements remain
-manual validation. Measure publication overhead and subsequent restore time
-on the target filesystem, and verify artifact GET bytes. Start by pinning the
-new Sandbox to the publishing node. Automatic cache-affinity scheduling is
+Real Firecracker snapshot/restore and GC-eviction fallback have been
+[validated remotely with an 812 MiB artifact set](native-snapshot-prewarm-validation.md).
+Larger artifact sets, repeated latency samples and crash recovery remain
+additional validation. Start by pinning the new Sandbox to the publishing
+node. Automatic cache-affinity scheduling is
 a separate change; local cache installation alone does not guarantee placement
 or retention. OCI artifacts and extra artifact types on newer upstream branches
 require their own integration.
