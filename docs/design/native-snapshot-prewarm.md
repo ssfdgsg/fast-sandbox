@@ -9,7 +9,10 @@ The default is disabled. No API, CRD or scheduling change is required.
 After the VM has resumed and remote publication has succeeded, the Driver
 attempts to install staging under `images/sha256(templateName)`. The cache
 uses the same manifest and file-name mapping as Agent pull: `rootfs.ext4`
-becomes `rootfs.img`; VM state and memory keep their names.
+becomes `rootfs.img`; VM state and memory keep their names. The shared
+`artifacts.VMManifest` contract is validated before installation. Optional
+`platform.stateFiles` vault/policy bundles retain their names and move with
+the complete set, so prewarm and cold pull preserve the same platform state.
 
 The staged manifest must match the digest returned by publication. File
 types and logical sizes must match the manifest. The Driver trusts the
@@ -74,13 +77,17 @@ Automated coverage includes:
 - Independent writable instance rootfs files and inode-preserving installation.
 - Busy/conflicting cache, truncated staging, digest mismatch, cancelled work
   and staging cleanup.
+- Both template and checkpoint caches retain vault/policy bundles. Missing
+  state files invalidate readiness; Agent verification rejects same-size
+  state-file corruption.
 - An active pull racing with prewarm and GC, cancellable competing pulls,
   active-reader protection, checkpoint reference protection, and cross-process
   file-lock exclusion.
 
 This is a cache optimization. Directory rename provides atomic visibility,
 not power-loss durability. This branch preserves existing hand-seeded local
-cache support, including entries without a full manifest. The Driver checks
+cache support for entries without a manifest; existing manifests use the
+upstream shared schema validation. The Driver checks
 published manifest file sizes without adding a full checksum scan to each
 hot restore; it does not implement generic restore-error repair/retry.
 Agent journal pins/leases are not newly integrated into Driver GC.
@@ -91,5 +98,5 @@ Larger artifact sets, repeated latency samples and crash recovery remain
 additional validation. Start by pinning the new Sandbox to the publishing
 node. Automatic cache-affinity scheduling is
 a separate change; local cache installation alone does not guarantee placement
-or retention. OCI artifacts and extra artifact types on newer upstream branches
-require their own integration.
+or retention. OCI artifacts continue through the upstream fsb-vm path and do
+not acquire the native image-cache locks or use this prewarm installer.

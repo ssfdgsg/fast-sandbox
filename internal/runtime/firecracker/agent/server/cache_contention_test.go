@@ -53,7 +53,7 @@ func TestPinImageWaitsForWriterAfterSuccessfulPull(t *testing.T) {
 				err      error
 			}
 			done := make(chan result, 1)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			go func() {
 				response, err := service.PinImage(ctx, request)

@@ -24,6 +24,7 @@ import (
 
 	"k8s.io/klog/v2"
 
+	"fast-sandbox/internal/artifacts"
 	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
 
@@ -125,12 +126,14 @@ func cacheComplete(dir string) (bool, error) {
 	if err != nil {
 		return false, nil //nolint:nilerr // a corrupt cached manifest means the pull is not complete
 	}
-	files, err := document.nativeFiles()
+	files, err := imagecache.RestoreFiles(artifacts.VMManifest(document))
 	if err != nil {
 		return false, nil //nolint:nilerr // an incomplete native file set means the pull is not complete
 	}
 	for _, file := range files {
-		match, err := fileMatches(filepath.Join(dir, file.cache), file)
+		match, err := fileMatches(filepath.Join(dir, file.Cached), nativeFile{
+			publish: file.Published, cache: file.Cached, sha256: file.SHA256, sizeBytes: file.SizeBytes,
+		})
 		if err != nil || !match {
 			return false, nil //nolint:nilerr // any mismatch or read failure means the pull is not complete; the next pull redoes it
 		}

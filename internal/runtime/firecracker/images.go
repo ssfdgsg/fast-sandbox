@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +15,8 @@ import (
 
 	"k8s.io/klog/v2"
 
+	"fast-sandbox/internal/artifacts"
+	"fast-sandbox/internal/ocitemplate"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
@@ -63,11 +64,25 @@ func resolveRootfsImage(stateRoot, image string) (string, error) {
 	if info, err := os.Stat(path); err != nil || info.IsDir() {
 		return "", fmt.Errorf("%w: %q", ErrImageNotReady, image)
 	}
+	// Local and agent-unreachable restores must not bypass the removal of
+	// OverlayBD object-store templates by reusing an old raw-file cache.
+	payload, err := os.ReadFile(cachedManifestPath(stateRoot, image))
+	if err == nil {
+		document, err := artifacts.DecodeVMManifest(payload)
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+		}
+		if len(document.Files) == 0 {
+			return "", fmt.Errorf("%w: cached native image has no files", ErrInvalidConfig)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
 	return path, nil
 }
 
-// verifyRestorableImage verifies the COMPLETE restore set of an image is
-// committed in the local cache: rootfs plus both golden snapshots. This is
+// verifyRestorableImage checks the native restore set in the local cache;
+// OCI references defer storage preparation to fsb-vm. For native images this is
 // the single readiness criterion shared by async delivery and EnsureSandbox,
 // so a partially delivered cache (rootfs committed while vmstate/memory are
 // still transferring) never reports ready. Without it, a parked boot worker
@@ -75,6 +90,10 @@ func resolveRootfsImage(stateRoot, image string) (string, error) {
 // network slot only to release-destroy it on the snapshot check — burning
 // the slot pool faster than replenishment and failing the cold create.
 func verifyRestorableImage(stateRoot, image string) error {
+	if strings.HasPrefix(image, ocitemplate.Prefix) {
+		// OCI storage is prepared on demand by fsb-vm, not delivered by the agent.
+		return validateOCIReference(image)
+	}
 	if _, err := resolveRootfsImage(stateRoot, image); err != nil {
 		return err
 	}
@@ -82,29 +101,17 @@ func verifyRestorableImage(stateRoot, image string) error {
 		return err
 	}
 	// Hand-seeded local images may have no artifact manifest. Published
-	// entries must have every advertised native artifact at the right size.
+	// entries include all advertised native artifacts and platform state.
 	dir := filepath.Join(stateRoot, imageCacheDir, imageKey(image))
-	payload, err := os.ReadFile(filepath.Join(dir, snapshotManifestName))
+	_, files, err := imagecache.ReadManifest(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("%w: read manifest: %v", ErrImageNotReady, err)
 	}
-	var document struct {
-		Files map[string]imagecache.File `json:"files"`
-	}
-	if err := json.Unmarshal(payload, &document); err != nil {
-		return fmt.Errorf("%w: decode manifest: %v", ErrImageNotReady, err)
-	}
-	if document.Files != nil {
-		files, err := imagecache.NativeFiles(document.Files)
-		if err == nil {
-			err = imagecache.CheckFiles(dir, files, false)
-		}
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrImageNotReady, err)
-		}
+	if err := imagecache.CheckFiles(dir, files, false); err != nil {
+		return fmt.Errorf("%w: %v", ErrImageNotReady, err)
 	}
 	return nil
 }
@@ -127,6 +134,7 @@ func listCachedImages(stateRoot string) ([]string, error) {
 		}
 		if _, err := os.Stat(filepath.Join(base, entry.Name(), rootfsImageName)); err == nil {
 			images = append(images, entry.Name())
+
 		}
 	}
 	return images, nil
@@ -343,7 +351,8 @@ func (d *Driver) ListImages(_ context.Context) ([]string, error) {
 	return listCachedImages(d.config.StateRoot)
 }
 
-// PullImage ensures the rootfs image is present in the local cache. With a
+// PullImage defers OCI preparation to fsb-vm and ensures native images are
+// present in the local cache. With a
 // runtime-agent configured, the pull proxies to the agent's PinImage (the
 // node-level pull chain image -> index -> manifest -> digest-verified
 // cache); an unreachable agent degrades to the local cache check so warm
@@ -351,6 +360,12 @@ func (d *Driver) ListImages(_ context.Context) ([]string, error) {
 // unconverted reference is reported as ErrImageNotReady instead of blocking
 // the create path.
 func (d *Driver) PullImage(ctx context.Context, image string) error {
+	if err := validateOCISupport(image); err != nil {
+		return err
+	}
+	if strings.HasPrefix(image, ocitemplate.Prefix) {
+		return validateOCIReference(image)
+	}
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot
 	d.mu.RUnlock()

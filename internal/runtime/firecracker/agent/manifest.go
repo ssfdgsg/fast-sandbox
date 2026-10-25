@@ -5,31 +5,24 @@ package agent
 // index.artifactDigest before any artifact is pulled.
 
 import (
-	"encoding/json"
 	"fmt"
 
+	"fast-sandbox/internal/artifacts"
 	"fast-sandbox/internal/runtime/firecracker/imagecache"
 )
 
-// manifestFile describes one published artifact.
-type manifestFile = imagecache.File
+// manifest adds transport-specific helpers to the shared metadata model.
+type manifest artifacts.VMManifest
 
-// manifest is the consumer-side view of manifest.json; only the file list
-// is needed by the pull layer.
-type manifest struct {
-	Files map[string]manifestFile `json:"files"`
-}
-
-// parseManifest decodes a downloaded manifest document.
 func parseManifest(payload []byte) (manifest, error) {
-	var document manifest
-	if err := json.Unmarshal(payload, &document); err != nil {
+	document, err := artifacts.DecodeVMManifest(payload)
+	if err != nil {
 		return manifest{}, fmt.Errorf("decode manifest: %w", err)
 	}
 	if len(document.Files) == 0 {
-		return manifest{}, fmt.Errorf("manifest has no files")
+		return manifest{}, fmt.Errorf("manifest has no native files; OCI artifacts must be prepared through fsb-vm")
 	}
-	return document, nil
+	return manifest(document), nil
 }
 
 // nativeFile pairs a published artifact with its local cache name and the
@@ -64,6 +57,39 @@ func (m manifest) nativeFiles() ([]nativeFile, error) {
 		})
 	}
 	return files, nil
+}
+
+// vaultFile returns the optional vault bundle entry of a checkpoint set.
+// An absent entry is (file, false, nil) — golden images never carry one; a
+// present-but-malformed entry fails the pull, matching nativeFiles(): the
+// committed manifest lists the file, so silently skipping it would strand
+// the checkpoint's vault state.
+func (m manifest) vaultFile() (nativeFile, bool, error) {
+	return m.bundleFile(publishVaultName)
+}
+
+// policyFile returns the optional recorded-policy bundle entry of a
+// snapshot set (checkpoint or template). Same contract as vaultFile().
+func (m manifest) policyFile() (nativeFile, bool, error) {
+	return m.bundleFile(publishPolicyName)
+}
+
+// bundleFile resolves one optional state bundle entry by published name.
+func (m manifest) bundleFile(name string) (nativeFile, bool, error) {
+	if m.Platform == nil {
+		return nativeFile{}, false, nil
+	}
+	entry, ok := m.Platform.StateFiles[name]
+	if !ok {
+		return nativeFile{}, false, nil
+	}
+	if !validSHA256(entry.SHA256) {
+		return nativeFile{}, false, fmt.Errorf("manifest artifact %s has an invalid sha256", name)
+	}
+	return nativeFile{
+		publish: name, cache: name,
+		sha256: entry.SHA256, sizeBytes: entry.SizeBytes,
+	}, true, nil
 }
 
 // validSHA256 reports whether sum is a lowercase sha256 hex digest.

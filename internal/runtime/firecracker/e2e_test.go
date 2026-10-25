@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/artifacts"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
@@ -431,7 +431,7 @@ func runE2EOnce(t *testing.T, useInfra bool) {
 // args, machine tuple): a cached set from an older recipe is incompatible
 // with the current restore driver (e.g. it lacks the baked NIC that
 // network_overrides expects), so the reuse check must reject it.
-const e2ePrepVersion = 4
+const e2ePrepVersion = 5
 
 // bootVM starts the microVM and waits until the machine state is Running.
 // It serves the golden-snapshot prep path only (cold boot: InstanceStart);
@@ -598,21 +598,19 @@ func prepareE2EGoldenSnapshot(t *testing.T, binary, kernel, rootfs, stateRoot, i
 	require.NoError(t, err)
 	memoryDigest, err := fileSHA256(memory)
 	require.NoError(t, err)
-	manifest, err := json.Marshal(map[string]any{
-		"machine": map[string]any{"vcpu": "1", "memory": "512Mi"},
-		// The baked guest network (clone model): every restored instance
-		// owns the same static address; per-instance identity is the slot
-		// IP, translated to this address by the netns DNAT.
-		"guestNetwork": map[string]any{
-			"iface": "eth0", "mac": e2ePrepMAC, "ip": e2ePrepGuestIP,
-			"gateway": "172.30.0.1", "netmask": "255.255.255.0",
-		},
-		"files": map[string]any{
-			"rootfs.ext4":  map[string]any{"sha256": rootfsDigest, "sizeBytes": fileSize(t, rootfsImg)},
-			"vmstate.snap": map[string]any{"sha256": vmstateDigest, "sizeBytes": fileSize(t, vmstate)},
-			"memory.snap":  map[string]any{"sha256": memoryDigest, "sizeBytes": fileSize(t, memory)},
-		},
-	})
+	document := artifacts.NewVMManifest(artifacts.VMMachine{
+		VCPUCount: 1, MemoryMiB: 512, RootfsSizeMiB: (fileSize(t, rootfsImg) + (1 << 20) - 1) >> 20,
+		RootfsDriveID: "root", RootfsDrivePath: "rootfs.img",
+	}, envOr("FC_KERNEL_VERSION", "6.1.176"), binary, artifacts.CPUTemplateNone)
+	document.GuestNetwork = &artifacts.VMGuestNetwork{
+		Iface: "eth0", MAC: e2ePrepMAC, IP: e2ePrepGuestIP, Gateway: "172.30.0.1", Netmask: "255.255.255.0",
+	}
+	document.Files = map[string]artifacts.ManifestFile{
+		"rootfs.ext4":  {SHA256: rootfsDigest, SizeBytes: fileSize(t, rootfsImg)},
+		"vmstate.snap": {SHA256: vmstateDigest, SizeBytes: fileSize(t, vmstate)},
+		"memory.snap":  {SHA256: memoryDigest, SizeBytes: fileSize(t, memory)},
+	}
+	manifest, err := artifacts.MarshalVMManifest(document)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(manifestPath, manifest, 0o640))
 	t.Logf("prepared golden snapshot set %s (rootfs=%s)", dir, filepath.Base(rootfs))

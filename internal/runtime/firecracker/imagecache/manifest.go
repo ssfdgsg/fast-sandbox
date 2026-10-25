@@ -2,17 +2,16 @@ package imagecache
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"fast-sandbox/internal/artifacts"
+	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
 )
 
 // File is the producer's digest and logical size of one artifact.
-type File struct {
-	SHA256    string `json:"sha256"`
-	SizeBytes int64  `json:"sizeBytes"`
-}
+type File = artifacts.ManifestFile
 
 // NativeFile maps an artifact name to its immutable local cache name.
 type NativeFile struct {
@@ -45,6 +44,29 @@ func NativeFiles(files map[string]File) ([]NativeFile, error) {
 	return result, nil
 }
 
+// RestoreFiles includes platform state listed by the shared manifest. Native
+// prewarm must retain the same vault/policy bytes that a later pull restores.
+func RestoreFiles(document artifacts.VMManifest) ([]NativeFile, error) {
+	files, err := NativeFiles(document.Files)
+	if err != nil {
+		return nil, err
+	}
+	if document.Platform == nil {
+		return files, nil
+	}
+	for _, name := range []string{agentprotocol.VaultBundleName, agentprotocol.PolicyBundleName} {
+		entry, ok := document.Platform.StateFiles[name]
+		if !ok {
+			continue
+		}
+		if !ValidKey(entry.SHA256) || entry.SizeBytes < 1 {
+			return nil, fmt.Errorf("invalid platform state file %q", name)
+		}
+		files = append(files, NativeFile{Published: name, Cached: name, File: entry})
+	}
+	return files, nil
+}
+
 // ReadManifest reads the complete native file list without hashing artifact
 // contents again. Producers hash staging, and pull verifies downloaded bytes.
 func ReadManifest(dir string) ([]byte, []NativeFile, error) {
@@ -52,13 +74,11 @@ func ReadManifest(dir string) ([]byte, []NativeFile, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	var document struct {
-		Files map[string]File `json:"files"`
-	}
-	if err := json.Unmarshal(payload, &document); err != nil {
+	document, err := artifacts.DecodeVMManifest(payload)
+	if err != nil {
 		return nil, nil, fmt.Errorf("decode manifest: %w", err)
 	}
-	files, err := NativeFiles(document.Files)
+	files, err := RestoreFiles(document)
 	return payload, files, err
 }
 

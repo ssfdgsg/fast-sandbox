@@ -36,7 +36,9 @@ func stageNativeSnapshot(t *testing.T, root, rootfs string) (string, string) {
 		require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte(content), 0o640))
 		files[name] = imagecache.File{SHA256: artifacts.SHA256Of([]byte(content)), SizeBytes: int64(len(content))}
 	}
-	payload, err := json.Marshal(map[string]any{"files": files})
+	document := testManifestDocument(t)
+	document["files"] = files
+	payload, err := json.Marshal(document)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(staging, snapshotManifestName), payload, 0o640))
 	return staging, artifacts.SHA256Of(payload)
@@ -196,4 +198,51 @@ func TestCreateTemplateSnapshotPrewarmFailureKeepsPublishedResult(t *testing.T) 
 	require.True(t, fixture.server.running)
 	require.ErrorIs(t, verifyRestorableImage(fixture.stateRoot, "template-no-room"), ErrImageNotReady)
 	require.NoDirExists(t, filepath.Join(fixture.stateRoot, snapshotStagingDir, "snap-no-room"))
+}
+
+func TestSnapshotPrewarmPreservesPlatformState(t *testing.T) {
+	requireNativeCacheInstallation(t)
+	for _, kind := range []fastletapi.SnapshotKind{fastletapi.SnapshotKindTemplate, fastletapi.SnapshotKindCheckpoint} {
+		t.Run(string(kind), func(t *testing.T) {
+			fixture, _ := newSnapshotFixture(t)
+			t.Setenv(snapshotPrewarmEnv, "true")
+			sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+			vault, policy := []byte(`{"snapshot":"vault"}`), []byte(`{"defaultAction":"deny"}`)
+			fixture.driver.SetStateMover(&fakeTemplateCapableMover{fakeStateMover: &fakeStateMover{
+				exportData: map[runtimecontract.StateKind][]byte{
+					runtimecontract.StateKindVault: vault, runtimecontract.StateKindPolicy: policy,
+				},
+			}})
+			input := &runtimecontract.SnapshotInput{SandboxID: sandboxID, SnapshotID: "snapshot-state", Kind: kind}
+			if kind == fastletapi.SnapshotKindTemplate {
+				input.TemplateName = "template-state"
+			}
+			result, err := fixture.driver.CreateSnapshot(context.Background(), input)
+			require.NoError(t, err)
+			reference := input.TemplateName
+			if kind == fastletapi.SnapshotKindCheckpoint {
+				reference = artifacts.CheckpointReference(result.ArtifactDigest)
+			}
+			cache := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(reference))
+			for name, want := range map[string][]byte{vaultBundleName: vault, policyBundleName: policy} {
+				got, err := os.ReadFile(filepath.Join(cache, name))
+				require.NoError(t, err)
+				require.Equal(t, want, got)
+			}
+			ready, err := agent.ImageReady(fixture.stateRoot, reference)
+			require.NoError(t, err)
+			require.True(t, ready)
+			require.NoError(t, verifyRestorableImage(fixture.stateRoot, reference))
+			require.NoError(t, os.Remove(filepath.Join(cache, vaultBundleName)))
+			require.ErrorIs(t, verifyRestorableImage(fixture.stateRoot, reference), ErrImageNotReady)
+			ready, err = agent.ImageReady(fixture.stateRoot, reference)
+			require.NoError(t, err)
+			require.False(t, ready, "missing platform state must not be a cache hit")
+			require.NoError(t, os.WriteFile(filepath.Join(cache, vaultBundleName), vault, 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(cache, policyBundleName), []byte(strings.Repeat("x", len(policy))), 0o600))
+			ready, err = agent.ImageReady(fixture.stateRoot, reference)
+			require.NoError(t, err)
+			require.False(t, ready, "same-size corrupt platform state must fail Agent verification")
+		})
+	}
 }

@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -45,6 +46,30 @@ func TestResolveRootfsImage(t *testing.T) {
 	resolved, err := resolveRootfsImage(root, image)
 	require.NoError(t, err)
 	require.Equal(t, path, resolved)
+}
+
+func TestLocalCacheRejectsIncompleteManifest(t *testing.T) {
+	root, image := t.TempDir(), "example.com/legacy-overlaybd:v1"
+	path, err := imageCachePath(root, image)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0750))
+	for name, content := range map[string]string{
+		rootfsImageName: "rootfs-image-data", vmstateSnapshotName: "vmstate-snapshot-data", memorySnapshotName: "memory-snapshot-data",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(path), name), []byte(content), 0640))
+	}
+	manifest := cachedManifestPath(root, image)
+	require.NoError(t, os.WriteFile(manifest, []byte(`{"format":"overlaybd"}`), 0640))
+	require.ErrorIs(t, verifyRestorableImage(root, image), ErrInvalidConfig)
+	driver := &Driver{config: firecrackerConfigForTest(t, root)}
+	require.ErrorIs(t, driver.PullImage(context.Background(), image), ErrInvalidConfig)
+
+	// The supported native cache remains usable without a runtime-agent.
+	raw, err := json.Marshal(testManifestDocument(t))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifest, raw, 0640))
+	require.NoError(t, verifyRestorableImage(root, image))
+	require.NoError(t, driver.PullImage(context.Background(), image))
 }
 
 func TestListCachedImagesAndDriverSurfaces(t *testing.T) {
