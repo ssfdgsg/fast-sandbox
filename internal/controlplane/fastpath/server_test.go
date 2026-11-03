@@ -974,6 +974,29 @@ func TestPoolInfoExposesResourceAwareRequestsAndLimits(t *testing.T) {
 	require.Equal(t, "2", info.SandboxResourceProfile.OvercommitRatio.Cpu)
 	require.Equal(t, "2", info.SandboxResourceProfile.OvercommitRatio.Memory)
 	require.Equal(t, int64(256), info.SandboxResourceProfile.Pids)
+	require.Equal(t, int32(0), info.SandboxResourceProfile.Gpus)
+}
+
+func TestPoolInfoExposesGPUResources(t *testing.T) {
+	// 1. LegacySlot GPU Pool
+	legacyPool := discoveryPool("pool-gpu-legacy", "default")
+	legacyPool.Spec.SandboxResources = apiv1alpha2.NewLegacySandboxResourceProfile(
+		resource.MustParse("2"), resource.MustParse("8Gi"), 128,
+	)
+	legacyPool.Spec.SandboxResources.GPUs = 2
+	legacyInfo := poolInfo(legacyPool)
+	require.Equal(t, fastpathv2.SandboxResourceMode_SANDBOX_RESOURCE_MODE_LEGACY_SLOT, legacyInfo.SandboxResourceProfile.Mode)
+	require.Equal(t, int32(2), legacyInfo.SandboxResourceProfile.Gpus)
+
+	// 2. ResourceAware GPU Pool
+	awarePool := discoveryPool("pool-gpu-aware", "default")
+	awarePool.Spec.SandboxResources = apiv1alpha2.NewResourceAwareSandboxResourceProfile(
+		resource.MustParse("2"), resource.MustParse("16Gi"), resource.MustParse("2"), resource.MustParse("2"), 256,
+	)
+	awarePool.Spec.SandboxResources.GPUs = 4
+	awareInfo := poolInfo(awarePool)
+	require.Equal(t, fastpathv2.SandboxResourceMode_SANDBOX_RESOURCE_MODE_RESOURCE_AWARE, awareInfo.SandboxResourceProfile.Mode)
+	require.Equal(t, int32(4), awareInfo.SandboxResourceProfile.Gpus)
 }
 
 func TestGetSandboxDiagnosticsUsesAnnotationAndDegrades(t *testing.T) {

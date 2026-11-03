@@ -231,3 +231,87 @@ func TestValidateResourceContractBranchesByMode(t *testing.T) {
 	resourceAware.FastletTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
 	require.NoError(t, resourceAware.ValidateResourceContract())
 }
+
+func TestValidateGPUContract(t *testing.T) {
+	var nilSpec *SandboxPoolSpec
+	require.ErrorContains(t, nilSpec.ValidateGPUContract(), "sandbox pool spec is required")
+
+	zeroGPU := SandboxPoolSpec{
+		Runtime:            RuntimeContainer,
+		MaxSandboxesPerPod: 2,
+		SandboxResources:   SandboxResourceProfile{GPUs: 0},
+	}
+	require.NoError(t, zeroGPU.ValidateGPUContract())
+
+	negativeGPU := SandboxPoolSpec{
+		Runtime:            RuntimeContainer,
+		MaxSandboxesPerPod: 2,
+		SandboxResources:   SandboxResourceProfile{GPUs: -1},
+	}
+	require.ErrorContains(t, negativeGPU.ValidateGPUContract(), "between 0 and 64")
+
+	excessiveGPU := SandboxPoolSpec{
+		Runtime:            RuntimeContainer,
+		MaxSandboxesPerPod: 2,
+		SandboxResources:   SandboxResourceProfile{GPUs: 65},
+	}
+	require.ErrorContains(t, excessiveGPU.ValidateGPUContract(), "between 0 and 64")
+
+	nonContainerRuntime := SandboxPoolSpec{
+		Runtime:            RuntimeGVisor,
+		MaxSandboxesPerPod: 2,
+		SandboxResources:   SandboxResourceProfile{GPUs: 1},
+		FastletTemplate:    corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet"}}}},
+	}
+	require.ErrorContains(t, nonContainerRuntime.ValidateGPUContract(), "requires runtime container")
+
+	zeroSlots := SandboxPoolSpec{
+		Runtime:            RuntimeContainer,
+		MaxSandboxesPerPod: 0,
+		SandboxResources:   SandboxResourceProfile{GPUs: 1},
+		FastletTemplate:    corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet"}}}},
+	}
+	require.ErrorContains(t, zeroSlots.ValidateGPUContract(), "positive maxSandboxesPerPod")
+
+	noContainers := SandboxPoolSpec{
+		Runtime:            RuntimeContainer,
+		MaxSandboxesPerPod: 2,
+		SandboxResources:   SandboxResourceProfile{GPUs: 1},
+		FastletTemplate:    corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{}}},
+	}
+	require.ErrorContains(t, noContainers.ValidateGPUContract(), "requires a Fastlet container")
+
+	explicitLimit := SandboxPoolSpec{
+		Runtime:            RuntimeContainer,
+		MaxSandboxesPerPod: 2,
+		SandboxResources:   SandboxResourceProfile{GPUs: 1},
+		FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "fastlet",
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2")},
+			},
+		}}}},
+	}
+	require.ErrorContains(t, explicitLimit.ValidateGPUContract(), "is derived; do not set it")
+
+	explicitRequest := SandboxPoolSpec{
+		Runtime:            RuntimeContainer,
+		MaxSandboxesPerPod: 2,
+		SandboxResources:   SandboxResourceProfile{GPUs: 1},
+		FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "fastlet",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2")},
+			},
+		}}}},
+	}
+	require.ErrorContains(t, explicitRequest.ValidateGPUContract(), "is derived; do not set it")
+
+	valid := SandboxPoolSpec{
+		Runtime:            RuntimeContainer,
+		MaxSandboxesPerPod: 4,
+		SandboxResources:   SandboxResourceProfile{GPUs: 2},
+		FastletTemplate:    corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet"}}}},
+	}
+	require.NoError(t, valid.ValidateGPUContract())
+}

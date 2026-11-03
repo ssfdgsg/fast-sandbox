@@ -32,16 +32,37 @@ if args.expect_count:
     assert torch.cuda.is_available()
     assert torch.cuda.device_count() == args.expect_count
     info.update(torch=torch.__version__, cuda=torch.version.cuda, arches=torch.cuda.get_arch_list())
+    nvml = None
+    try:
+        nvml = ctypes.CDLL('libnvidia-ml.so.1')
+        if nvml.nvmlInit() != 0:
+            nvml = None
+    except Exception:
+        nvml = None
     for ordinal in range(count.value):
         dev = ctypes.c_int()
-        uuid = (ctypes.c_ubyte * 16)()
         assert driver.cuDeviceGet(ctypes.byref(dev), ordinal) == 0
-        assert driver.cuDeviceGetUuid(ctypes.byref(uuid), dev) == 0
-        h = bytes(uuid).hex()
-        info['uuids'].append('GPU-' + '-'.join((h[:8], h[8:12], h[12:16], h[16:20], h[20:])))
+        resolved_uuid = None
+        if nvml is not None:
+            handle = ctypes.c_void_p()
+            if nvml.nvmlDeviceGetHandleByIndex(ordinal, ctypes.byref(handle)) == 0:
+                buf = ctypes.create_string_buffer(96)
+                if nvml.nvmlDeviceGetUUID(handle, buf, 96) == 0:
+                    resolved_uuid = buf.value.decode('utf-8')
+        if not resolved_uuid:
+            uuid = (ctypes.c_ubyte * 16)()
+            assert driver.cuDeviceGetUuid(ctypes.byref(uuid), dev) == 0
+            h = bytes(uuid).hex()
+            resolved_uuid = 'GPU-' + '-'.join((h[:8], h[8:12], h[12:16], h[16:20], h[20:]))
+        info['uuids'].append(resolved_uuid)
         x = torch.ones((32, 32), device=f'cuda:{ordinal}')
         assert (x @ x).sum().item() == 32768
         torch.cuda.synchronize(ordinal)
+    if nvml is not None:
+        try:
+            nvml.nvmlShutdown()
+        except Exception:
+            pass
 else:
     assert not glob.glob('/dev/nvidia[0-9]*'), info
 print('FSB_GPU_PROBE_OK ' + json.dumps(info, sort_keys=True), flush=True)

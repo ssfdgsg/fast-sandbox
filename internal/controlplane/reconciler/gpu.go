@@ -23,6 +23,9 @@ func applyGPUResources(pool *apiv1alpha2.SandboxPool, plan runtimeenv.ResolvedRu
 	if err := pool.Spec.ValidateGPUContract(); err != nil {
 		return err
 	}
+	if plan.Kubelet.Root == "" {
+		return fmt.Errorf("GPU Pool requires a kubelet root in the runtime environment")
+	}
 	owner := &pod.Containers[0]
 	total := int64(count) * int64(pool.Spec.MaxSandboxesPerPod)
 	quantity := *resource.NewQuantity(total, resource.DecimalSI)
@@ -42,9 +45,6 @@ func applyGPUResources(pool *apiv1alpha2.SandboxPool, plan runtimeenv.ResolvedRu
 		{Name: "gpu-cdi-etc", HostPath: "/etc/cdi", MountPath: "/etc/cdi", Type: create, ReadOnly: true},
 		{Name: "gpu-cdi-run", HostPath: "/var/run/cdi", MountPath: "/var/run/cdi", Type: create, ReadOnly: true},
 		{Name: "gpu-leases", HostPath: "/var/lib/fast-sandbox/gpu", MountPath: "/var/lib/fast-sandbox/gpu", Type: create},
-	}
-	if plan.Kubelet.Root == "" {
-		return fmt.Errorf("GPU Pool requires a kubelet root in the runtime environment")
 	}
 	return mergeRuntimeHostPaths(pod, owner, requirements)
 }

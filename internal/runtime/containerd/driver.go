@@ -934,13 +934,18 @@ func (r *Driver) PullImage(ctx context.Context, image string) error {
 }
 
 func (r *Driver) Close() error {
+	var errs []error
 	if r.gpuManager != nil {
-		defer r.gpuManager.Close()
+		if err := r.gpuManager.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if r.client != nil {
-		return r.client.Close()
+		if err := r.client.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (r *Driver) containerdNamespace() string {

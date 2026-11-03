@@ -372,6 +372,9 @@ func (p *PlacementStatus) Validate() error {
 
 // ValidateGPUContract keeps Kubernetes GPU ownership and Sandbox slot capacity aligned.
 func (s *SandboxPoolSpec) ValidateGPUContract() error {
+	if s == nil {
+		return errors.New("sandbox pool spec is required")
+	}
 	if s.SandboxResources.GPUs < 0 || s.SandboxResources.GPUs > 64 {
 		return fmt.Errorf("gpus must be between 0 and 64")
 	}
