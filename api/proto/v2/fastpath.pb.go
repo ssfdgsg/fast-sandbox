@@ -2821,7 +2821,9 @@ func (x *SandboxResourceRequirements) GetLimits() *ComputeResourceProfile {
 }
 
 type SandboxResourceProfileInfo struct {
-	state           protoimpl.MessageState  `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Fixed, exclusive NVIDIA whole GPUs per Sandbox; zero means CPU-only.
+	Gpus            int32                   `protobuf:"varint,6,opt,name=gpus,proto3" json:"gpus,omitempty"`
 	Mode            SandboxResourceMode     `protobuf:"varint,1,opt,name=mode,proto3,enum=fastpath.v2.SandboxResourceMode" json:"mode,omitempty"`
 	Requests        *ComputeResourceProfile `protobuf:"bytes,2,opt,name=requests,proto3" json:"requests,omitempty"`
 	Limits          *ComputeResourceProfile `protobuf:"bytes,3,opt,name=limits,proto3" json:"limits,omitempty"`
@@ -2859,6 +2861,13 @@ func (x *SandboxResourceProfileInfo) ProtoReflect() protoreflect.Message {
 // Deprecated: Use SandboxResourceProfileInfo.ProtoReflect.Descriptor instead.
 func (*SandboxResourceProfileInfo) Descriptor() ([]byte, []int) {
 	return file_api_proto_v2_fastpath_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *SandboxResourceProfileInfo) GetGpus() int32 {
+	if x != nil {
+		return x.Gpus
+	}
+	return 0
 }
 
 func (x *SandboxResourceProfileInfo) GetMode() SandboxResourceMode {
@@ -4304,8 +4313,9 @@ const file_api_proto_v2_fastpath_proto_rawDesc = "" +
 	"\x03cpu\x18\x01 \x01(\tR\x03cpu\x12\x16\n" +
 	"\x06memory\x18\x02 \x01(\tR\x06memory\"Z\n" +
 	"\x1bSandboxResourceRequirements\x12;\n" +
-	"\x06limits\x18\x01 \x01(\v2#.fastpath.v2.ComputeResourceProfileR\x06limits\"\xb4\x02\n" +
-	"\x1aSandboxResourceProfileInfo\x124\n" +
+	"\x06limits\x18\x01 \x01(\v2#.fastpath.v2.ComputeResourceProfileR\x06limits\"\xc8\x02\n" +
+	"\x1aSandboxResourceProfileInfo\x12\x12\n" +
+	"\x04gpus\x18\x06 \x01(\x05R\x04gpus\x124\n" +
 	"\x04mode\x18\x01 \x01(\x0e2 .fastpath.v2.SandboxResourceModeR\x04mode\x12?\n" +
 	"\brequests\x18\x02 \x01(\v2#.fastpath.v2.ComputeResourceProfileR\brequests\x12;\n" +
 	"\x06limits\x18\x03 \x01(\v2#.fastpath.v2.ComputeResourceProfileR\x06limits\x12\x12\n" +

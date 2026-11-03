@@ -51,3 +51,7 @@ limits, private networking, proxy access, Fastlet restart recovery, and
 idempotent cleanup under nested KVM.
 
 See [Secure runtimes](../guides/secure-runtimes.md).
+
+## GPU validation
+
+Optional whole-NVIDIA-GPU allocation is implemented only for `container` through native CDI. The runtime matrix above describes the existing CPU path; it does not establish GPU validation. GPU hardware and Kubernetes allocation gates are tracked separately in [Container GPU support](../guides/container-gpu.md). Other runtime profiles reject GPU Pool configuration.

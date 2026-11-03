@@ -40,6 +40,9 @@ func (s *SandboxPoolSpec) ValidateResourceContract() error {
 	if err := ValidateSandboxResourceProfile(s.SandboxResources); err != nil {
 		return err
 	}
+	if err := s.ValidateGPUContract(); err != nil {
+		return err
+	}
 	if s.SandboxResources.ResourceMode() != SandboxResourceModeResourceAware {
 		return nil
 	}
@@ -363,6 +366,33 @@ func (p *PlacementStatus) Validate() error {
 	}
 	if p.Attempt < 1 {
 		return errors.New("attempt must be at least 1")
+	}
+	return nil
+}
+
+// ValidateGPUContract keeps Kubernetes GPU ownership and Sandbox slot capacity aligned.
+func (s *SandboxPoolSpec) ValidateGPUContract() error {
+	if s.SandboxResources.GPUs < 0 || s.SandboxResources.GPUs > 64 {
+		return fmt.Errorf("gpus must be between 0 and 64")
+	}
+	if s.SandboxResources.GPUs == 0 {
+		return nil
+	}
+	if s.Runtime != RuntimeContainer {
+		return fmt.Errorf("GPU allocation requires runtime container")
+	}
+	if s.MaxSandboxesPerPod <= 0 {
+		return fmt.Errorf("GPU allocation requires positive maxSandboxesPerPod")
+	}
+	if len(s.FastletTemplate.Spec.Containers) == 0 {
+		return fmt.Errorf("GPU allocation requires a Fastlet container")
+	}
+	for _, container := range s.FastletTemplate.Spec.Containers {
+		for _, values := range []corev1.ResourceList{container.Resources.Requests, container.Resources.Limits} {
+			if _, exists := values[corev1.ResourceName("nvidia.com/gpu")]; exists {
+				return fmt.Errorf("GPU Pool resources.nvidia.com/gpu is derived; do not set it on container %q", container.Name)
+			}
+		}
 	}
 	return nil
 }

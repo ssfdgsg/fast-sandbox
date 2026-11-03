@@ -1597,6 +1597,10 @@ func (r *SandboxPoolReconciler) constructPodWithResolvedResources(
 		return nil, err
 	}
 
+	if err := applyGPUResources(pool, runtimePlan, podSpec); err != nil {
+		return nil, err
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pool.Name + "-fastlet-",
@@ -2297,7 +2301,7 @@ var runtimeOwnedEnv = map[string]struct{}{
 func removeRuntimeOwnedEnv(env []corev1.EnvVar) []corev1.EnvVar {
 	result := env[:0]
 	for _, item := range env {
-		if _, owned := runtimeOwnedEnv[item.Name]; owned {
+		if _, owned := runtimeOwnedEnv[item.Name]; owned || strings.HasPrefix(item.Name, "FAST_SANDBOX_GPU_") {
 			continue
 		}
 		result = append(result, item)

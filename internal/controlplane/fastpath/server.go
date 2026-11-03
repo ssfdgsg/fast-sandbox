@@ -836,6 +836,7 @@ func poolInfo(pool *apiv1alpha2.SandboxPool) *fastpathv2.PoolInfo {
 	resourceProfile := &fastpathv2.SandboxResourceProfileInfo{
 		Limits: &fastpathv2.ComputeResourceProfile{Cpu: limits.CPU.String(), Memory: limits.Memory.String()},
 		Pids:   pool.Spec.SandboxResources.PIDs,
+		Gpus:   pool.Spec.SandboxResources.GPUs,
 	}
 	switch pool.Spec.SandboxResources.ResourceMode() {
 	case apiv1alpha2.SandboxResourceModeLegacySlot:

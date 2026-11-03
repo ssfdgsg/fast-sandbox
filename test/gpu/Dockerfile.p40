@@ -1,0 +1,6 @@
+# Candidate P40 smoke image. Validate on hardware and record the resolved digest before qualification.
+# Use a native Linux host driver compatible with CUDA 12.6 and Pascal.
+FROM python:3.11-slim-bookworm
+RUN python -m pip install --no-cache-dir torch==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+COPY cuda-probe.py /opt/fsb-gpu/cuda-probe.py
+CMD ["python", "-u", "/opt/fsb-gpu/cuda-probe.py", "--hold-seconds", "600"]

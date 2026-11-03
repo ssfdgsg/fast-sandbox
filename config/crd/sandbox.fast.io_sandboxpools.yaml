@@ -302,6 +302,14 @@ spec:
                       them per request; otherwise they are the defaults.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
+                  gpus:
+                    description: |-
+                      GPUs is the number of exclusively assigned NVIDIA whole GPUs per Sandbox.
+                      Zero preserves CPU-only behavior. Only runtime container supports GPUs.
+                    format: int32
+                    maximum: 64
+                    minimum: 0
+                    type: integer
                   memory:
                     anyOf:
                     - type: integer

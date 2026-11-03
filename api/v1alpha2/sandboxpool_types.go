@@ -37,6 +37,13 @@ type SandboxComputeResources struct {
 // in ResourceAware mode, the policy used to derive admission commitments.
 // Omitting Mode preserves the historical LegacySlot interpretation.
 type SandboxResourceProfile struct {
+	// GPUs is the number of exclusively assigned NVIDIA whole GPUs per Sandbox.
+	// Zero preserves CPU-only behavior. Only runtime container supports GPUs.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=64
+	// +optional
+	GPUs int32 `json:"gpus,omitempty"`
+
 	// +kubebuilder:validation:Enum=LegacySlot;ResourceAware
 	Mode SandboxResourceMode `json:"mode,omitempty"`
 

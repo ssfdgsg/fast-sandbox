@@ -346,6 +346,8 @@ message SandboxResourceRequirements {
 }
 
 message SandboxResourceProfileInfo {
+  // Fixed, exclusive NVIDIA whole GPUs per Sandbox; zero means CPU-only.
+  int32 gpus = 6;
   SandboxResourceMode mode = 1;
   ComputeResourceProfile requests = 2;
   ComputeResourceProfile limits = 3;

@@ -2,6 +2,7 @@ package containerd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -26,6 +28,7 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	dataplane "fast-sandbox/internal/dataplane/contract"
+	"fast-sandbox/internal/fastlet/gpu"
 	"fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	"fast-sandbox/internal/fastlet/podcgroup"
@@ -36,6 +39,7 @@ import (
 )
 
 type Driver struct {
+	gpuManager         *gpu.Manager
 	socketPath         string
 	client             *containerd.Client
 	fastletPodName     string
@@ -126,6 +130,9 @@ func (r *Driver) Initialize(ctx context.Context, socketPath string) error {
 }
 
 func (r *Driver) CreateSandbox(ctx context.Context, input *fastletapi.EnsureSandboxInput, allocation fastletapi.RuntimeAllocation) (_ *SandboxMetadata, resultErr error) {
+	if err := r.validateGPUAllocation(input, allocation); err != nil {
+		return nil, err
+	}
 	config := &input.Sandbox
 	identity := config.Identity
 	spec := config.Desired
@@ -312,6 +319,9 @@ func (r *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	finishInspect(inspectErr)
 	if err == nil {
 		if runtimecontract.SameRuntimeIdentity(existing.Config.Identity, identity) {
+			if err := r.validateGPUAllocation(input, existing.Allocation); err != nil {
+				return nil, err
+			}
 			if err := validateExistingRuntimeProfile(existing, config); err != nil {
 				return nil, err
 			}
@@ -333,6 +343,12 @@ func (r *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		return nil, err
 	}
 	allocation := fastletapi.RuntimeAllocation{}
+	if r.gpuManager != nil {
+		allocation.GPU, err = r.gpuManager.Acquire(identity)
+		if err != nil {
+			return nil, fmt.Errorf("reserve GPU: %w", err)
+		}
+	}
 	var owner fastletnetwork.Owner
 	if r.networkManager != nil {
 		owner = r.networkOwner(config)
@@ -475,6 +491,9 @@ func (r *Driver) prepareSpecOpts(ctx context.Context, config *fastletapi.Runtime
 
 	networkNamespace := specs.LinuxNamespace{Type: specs.NetworkNamespace, Path: network.NamespacePath}
 	specOpts = append(specOpts, oci.WithLinuxNamespace(networkNamespace))
+	if allocation.GPU != nil {
+		specOpts = append(specOpts, gpuSpecOpt(allocation.GPU))
+	}
 
 	return specOpts, infraInstance, nil
 }
@@ -605,6 +624,10 @@ func (r *Driver) prepareLabels(config *fastletapi.RuntimeSandboxConfig, allocati
 		"fast-sandbox.io/network-gateway":       network.Gateway,
 		"fast-sandbox.io/network-dns-path":      network.DNSPath,
 	}
+	if allocation.GPU != nil {
+		encoded, _ := json.Marshal(allocation.GPU.Devices)
+		labels["fast-sandbox.io/gpu-devices"] = string(encoded)
+	}
 	if network.PrivateCIDR != "" {
 		labels["fast-sandbox.io/network-private-cidr"] = network.PrivateCIDR
 	}
@@ -652,7 +675,13 @@ func (r *Driver) DeleteSandbox(ctx context.Context, sandboxID string) error {
 			networkErr = fmt.Errorf("release network slot: %w", err)
 		}
 	}
-	return errors.Join(infraErr, networkErr)
+	if cleanupErr := errors.Join(infraErr, networkErr); cleanupErr != nil {
+		return cleanupErr
+	}
+	if r.gpuManager != nil {
+		return r.gpuManager.Release(sandboxID)
+	}
+	return nil
 }
 
 func (r *Driver) deleteContainerdSandbox(ctx context.Context, sandboxID string) error {
@@ -720,7 +749,10 @@ func (r *Driver) InspectSandbox(ctx context.Context, sandboxID string) (*Sandbox
 	ctx = r.withNamespace(ctx)
 	container, err := r.client.LoadContainer(ctx, sandboxID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrSandboxNotFound, err)
+		if errdefs.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: %w", ErrSandboxNotFound, err)
+		}
+		return nil, err
 	}
 	info, err := container.Info(ctx)
 	if err != nil {
@@ -753,6 +785,13 @@ func (r *Driver) InspectSandbox(ctx context.Context, sandboxID string) (*Sandbox
 		CreatedAt:   info.CreatedAt.Unix(),
 		Phase:       "stopped",
 	}
+	if raw := info.Labels["fast-sandbox.io/gpu-devices"]; raw != "" {
+		var devices []string
+		if err := json.Unmarshal([]byte(raw), &devices); err != nil {
+			return nil, fmt.Errorf("invalid GPU allocation label: %w", err)
+		}
+		metadata.Allocation.GPU = &fastletapi.GPUAllocation{Devices: devices}
+	}
 	metadata.Config.Limits.PIDs, _ = strconv.ParseInt(info.Labels["fast-sandbox.io/resource-pids"], 10, 64)
 	metadata.Config.Identity.InstanceGeneration, _ = strconv.ParseInt(info.Labels["fast-sandbox.io/instance-generation"], 10, 64)
 	metadata.Config.Identity.AssignmentAttempt, _ = strconv.ParseInt(info.Labels["fast-sandbox.io/assignment-attempt"], 10, 64)
@@ -767,6 +806,9 @@ func (r *Driver) InspectSandbox(ctx context.Context, sandboxID string) (*Sandbox
 }
 
 func (r *Driver) RecoverRuntimeResources(ctx context.Context, managed []*SandboxMetadata, _ runtimecontract.ResourceRecoveryOwnerRetirer) error {
+	if err := r.recoverGPUs(ctx, managed); err != nil {
+		return err
+	}
 	if r.networkManager == nil {
 		return nil
 	}
@@ -788,7 +830,7 @@ func (r *Driver) RecoverRuntimeResources(ctx context.Context, managed []*Sandbox
 }
 
 func (r *Driver) RuntimeResourceAvailable() bool {
-	return r.networkManager == nil || r.networkManager.Snapshot().Clean > 0
+	return (r.networkManager == nil || r.networkManager.Snapshot().Clean > 0) && (r.gpuManager == nil || r.gpuManager.Available())
 }
 
 func (r *Driver) GetAccessDescriptor(sandboxID string) (dataplane.AccessDescriptor, error) {
@@ -839,7 +881,10 @@ func (r *Driver) ListManagedSandboxes(ctx context.Context) ([]*SandboxMetadata, 
 		}
 		metadata, err := r.InspectSandbox(ctx, container.ID())
 		if err != nil {
-			continue
+			if errors.Is(err, ErrSandboxNotFound) {
+				continue
+			}
+			return nil, err
 		}
 		managed = append(managed, metadata)
 	}
@@ -889,6 +934,9 @@ func (r *Driver) PullImage(ctx context.Context, image string) error {
 }
 
 func (r *Driver) Close() error {
+	if r.gpuManager != nil {
+		defer r.gpuManager.Close()
+	}
 	if r.client != nil {
 		return r.client.Close()
 	}

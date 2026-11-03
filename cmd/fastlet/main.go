@@ -21,6 +21,7 @@ import (
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	"fast-sandbox/internal/dataplane/fastletproxy"
 	fastletaction "fast-sandbox/internal/fastlet/action"
+	"fast-sandbox/internal/fastlet/gpu"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	"fast-sandbox/internal/fastlet/podcgroup"
@@ -171,6 +172,11 @@ func main() {
 		os.Exit(1)
 	}
 	infraConfigurable.SetInfraManager(infraManager)
+
+	if err := configureGPU(ctx, rt, resourceProfile, runtimeProfile.Name, runtimePlan.Containerd.Namespace, runtimePlan.Containerd.Socket); err != nil {
+		klog.ErrorS(err, "Failed to configure GPU allocation")
+		os.Exit(1)
+	}
 
 	klog.InfoS("runtime initialized successfully", "name", runtimeName)
 
@@ -714,4 +720,32 @@ func shutdownTracing(shutdown observability.Shutdown) {
 	if err := shutdown(ctx); err != nil {
 		klog.ErrorS(err, "Flush OpenTelemetry traces")
 	}
+}
+
+func configureGPU(ctx context.Context, rt runtimecontract.Driver, profile apiv1alpha2.SandboxResourceProfile, runtimeName apiv1alpha2.RuntimeName, runtimeNamespace, runtimeEndpoint string) error {
+	if profile.GPUs == 0 {
+		return nil
+	}
+	configurable, ok := rt.(interface{ SetGPUManager(*gpu.Manager) error })
+	if !ok || runtimeName != apiv1alpha2.RuntimeContainer {
+		return fmt.Errorf("%w: GPU allocation requires the container runtime", runtimecontract.ErrUnsupportedRuntime)
+	}
+	expected, err := strconv.Atoi(os.Getenv("FAST_SANDBOX_GPU_EXPECTED_DEVICES"))
+	podUID := os.Getenv("POD_UID")
+	if err != nil || expected != capacityFromEnvironment()*int(profile.GPUs) || podUID == "" {
+		return fmt.Errorf("%w: GPU capacity does not match the Kubernetes allocation", runtimecontract.ErrInvalidConfig)
+	}
+	ids, err := gpu.AssignedDevices(ctx, gpu.PodResourcesSocket, os.Getenv("NAMESPACE"), os.Getenv("POD_NAME"), os.Getenv("FAST_SANDBOX_GPU_CONTAINER_NAME"), expected)
+	if err != nil {
+		return err
+	}
+	manager, err := gpu.New(gpu.StateRoot, ids, int(profile.GPUs), podUID, runtimeNamespace, runtimeEndpoint)
+	if err != nil {
+		return err
+	}
+	if err = configurable.SetGPUManager(manager); err != nil {
+		_ = manager.Close()
+		return err
+	}
+	return nil
 }

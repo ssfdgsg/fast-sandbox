@@ -172,6 +172,9 @@ func divideRoundUp(value int64, ratio resource.Quantity) (int64, error) {
 // ValidateSandboxResourceProfile verifies either the legacy flat limit shape or
 // the ResourceAware default limits and overcommit policy required by a Pool.
 func ValidateSandboxResourceProfile(p SandboxResourceProfile) error {
+	if p.GPUs < 0 || p.GPUs > 64 {
+		return fmt.Errorf("%w: gpus must be between 0 and 64", ErrInvalidSandboxResourceProfile)
+	}
 	if p.PIDs <= 0 {
 		return fmt.Errorf("%w: pids must be greater than zero", ErrInvalidSandboxResourceProfile)
 	}
@@ -244,6 +247,16 @@ func (p SandboxResourceProfile) Hash() string {
 	}
 	if err != nil {
 		panic(err)
+	}
+	if p.GPUs != 0 {
+		// Do not change the historical CPU-only identity during rolling upgrades.
+		payload, err = json.Marshal(struct {
+			Profile json.RawMessage `json:"profile"`
+			GPUs    int32           `json:"gpus"`
+		}{Profile: payload, GPUs: p.GPUs})
+		if err != nil {
+			panic(err)
+		}
 	}
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
