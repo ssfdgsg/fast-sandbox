@@ -237,6 +237,12 @@ func TestGPUContainerdMultiFastletCUDA(t *testing.T) {
 	a := newGPUHardwareFixture(t, ids[:1], root, 1)
 	b := newGPUHardwareFixture(t, ids[1:], root, 1)
 	ia, ib := a.input("owner-a", 1), b.input("owner-b", 1)
+	results := make(chan error, 2)
+	go func() { _, err := a.driver.EnsureSandbox(a.ctx, ia); results <- err }()
+	go func() { _, err := b.driver.EnsureSandbox(b.ctx, ib); results <- err }()
+	firstErr, secondErr := <-results, <-results
+	require.NoError(t, firstErr)
+	require.NoError(t, secondErr)
 	ma, err := a.driver.EnsureSandbox(a.ctx, ia)
 	require.NoError(t, err)
 	mb, err := b.driver.EnsureSandbox(b.ctx, ib)

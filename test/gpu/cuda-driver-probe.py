@@ -65,7 +65,7 @@ def check(rc, operation):
 
 
 def run(expected, hold):
-    info = {'expected_count': expected, 'device_nodes': glob.glob('/dev/nvidia*'), 'uuids': [], 'pci_bus_ids': [], 'kernel': 'ptx-int32-matmul-32x32'}
+    info = {'expected_count': expected, 'device_nodes': glob.glob('/dev/nvidia*'), 'uuids': [], 'pci_bus_ids': [], 'devices': [], 'kernel': 'ptx-int32-matmul-32x32'}
     try:
         cuda = C.CDLL('libcuda.so.1')
     except OSError:
@@ -95,6 +95,12 @@ def run(expected, hold):
                 check(bind(nvml, 'nvmlDeviceGetUUID', [C.c_void_p, C.c_void_p, C.c_uint])(handle, uuid, len(uuid)), 'nvmlDeviceGetUUID')
                 info['uuids'].append(uuid.value.decode())
                 info['pci_bus_ids'].append(bus.value.decode())
+                name, major, minor = C.create_string_buffer(256), C.c_int(), C.c_int()
+                check(bind(cuda, 'cuDeviceGetName', [C.c_void_p, C.c_int, C.c_int])(name, len(name), dev), 'cuDeviceGetName')
+                attribute = bind(cuda, 'cuDeviceGetAttribute', [C.POINTER(C.c_int), C.c_int, C.c_int])
+                check(attribute(C.byref(major), 75, dev), 'compute capability major')
+                check(attribute(C.byref(minor), 76, dev), 'compute capability minor')
+                info['devices'].append({'name': name.value.decode(), 'compute_capability': [major.value, minor.value]})
                 check(bind(cuda, 'cuDevicePrimaryCtxRetain', [C.POINTER(C.c_void_p), C.c_int])(C.byref(ctx), dev), 'cuDevicePrimaryCtxRetain')
                 pointers = []
                 try:

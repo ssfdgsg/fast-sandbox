@@ -100,7 +100,7 @@ def task_pids():
     return {parts[0]: parts[1] for line in lines if len(parts := line.split()) >= 2}
 
 
-def sandbox_probe(name, expected):
+def sandbox_probe(name, expected, fresh=False):
     def check():
         sb = get('sandbox', name)
         if sb.get('status', {}).get('runtime', {}).get('state') != 'Ready':
@@ -111,7 +111,17 @@ def sandbox_probe(name, expected):
         pod = next((x for x in get('pods')['items'] if x['metadata']['uid'] == pod_uid), None)
         if not pod:
             return None
-        r = k('exec', pod['metadata']['name'], '-c', 'fastlet', '--', 'cat', f'/var/log/fast-sandbox/{uid}.log', allow=True)
+        if fresh:
+            # A Fastlet container restart may remove its original log file. Execute
+            # a new kernel in the exact surviving Sandbox task instead of trusting old output.
+            socket = os.environ.get('FSB_GPU_E2E_SOCKET', '/run/containerd/containerd.sock')
+            probe = (Path(__file__).parent / 'cuda-driver-probe.py').read_text()
+            r = cmd(['ctr', '--address', socket, '-n', 'k8s.io', 'tasks', 'exec',
+                     '--exec-id', 'fsb-gpu-check-' + str(time.time_ns()), uid,
+                     'python', '-u', '-c', probe, '--expect-count', str(expected),
+                     '--hold-seconds', '0'])
+        else:
+            r = k('exec', pod['metadata']['name'], '-c', 'fastlet', '--', 'cat', f'/var/log/fast-sandbox/{uid}.log', allow=True)
         for line in r.stdout.splitlines():
             if line.startswith('FSB_GPU_DRIVER_OK '):
                 value = json.loads(line.split(' ', 1)[1])
@@ -144,6 +154,9 @@ def delete_sandbox(name):
 
 
 try:
+    nodes = json.loads(cmd(['kubectl', '--request-timeout=15s', 'get', 'nodes', '-o', 'json']).stdout)['items']
+    assert len(nodes) == 1, 'This runner requires a dedicated single-node cluster and reads that node journal locally'
+    assert int(nodes[0].get('status', {}).get('allocatable', {}).get('nvidia.com/gpu', 0)) == 2, 'Exactly two exclusive allocatable GPUs are required for the third-Pod exhaustion gate'
     # Creating the namespace, rather than applying, prevents touching another test run.
     k('create', '-f', str(a.fixtures / 'namespace.json'))
     owned = True
@@ -190,8 +203,8 @@ try:
             statuses = pod.get('status', {}).get('containerStatuses', [])
             return pod['metadata']['uid'] == old_uid and ready(pod) and any(x['name'] == 'fastlet' and x['restartCount'] > old_restarts for x in statuses)
         wait('same-Pod Fastlet process restart', restarted)
-        sandbox_probe('gpu-test-2', 1)
-        sandbox_probe('gpu-test-3', 1)
+        sandbox_probe('gpu-test-2', 1, fresh=True)
+        sandbox_probe('gpu-test-3', 1, fresh=True)
         after = task_pids()
         for uid in [s2['metadata']['uid'], s3['metadata']['uid']]:
             assert uid in before and after.get(uid) == before[uid], (uid, before, after)

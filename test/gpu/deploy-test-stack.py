@@ -15,6 +15,14 @@ def run(args,obj=None):
  with (a.output/'deployment.log').open('a') as f:f.write(json.dumps({'args':args,'rc':r.returncode,'stdout':r.stdout,'stderr':r.stderr})+'\n')
  if r.returncode:raise RuntimeError(r.stderr)
  return r.stdout
+# Refuse duplicate NVIDIA allocators in any namespace before mutating the cluster.
+existing=json.loads(run(['get','daemonsets','--all-namespaces','-o','json']))
+for item in existing['items']:
+ for c in item['spec']['template']['spec'].get('containers',[]):
+  image=c.get('image','').lower()
+  allocator=('k8s-device-plugin' in image or 'nvidia-device-plugin' in image)
+  own=(item['metadata']['name']=='fsb-gpu-device-plugin' and item['metadata']['namespace']=='kube-system')
+  if allocator and not own:raise RuntimeError('Existing NVIDIA plugin found in '+item['metadata']['namespace']+'; inspect/use its exclusive UUID configuration instead of deploying a second allocator')
 # These manifests use public development route keys: dedicated test cluster only.
 run(['apply','-k',str(a.config/'dev')])
 value={'version':'v1alpha2','environments':{'default':{'containerd':{'socket':a.socket,'namespace':'k8s.io','defaultSnapshotter':'overlayfs','root':a.containerd_root},'kubelet':{'root':a.kubelet_root},'runtimes':{'container':{'fastletOverhead':{'cpu':'100m','memory':'128Mi'}}}}}}
@@ -26,10 +34,5 @@ run(['-n','fast-sandbox-system','patch','daemonset','fast-sandbox-janitor','--ty
 run(['-n','fast-sandbox-system','rollout','restart','daemonset/fast-sandbox-janitor'])
 run(['get','runtimeclass',a.nvidia_runtime_class])
 plugin={'apiVersion':'apps/v1','kind':'DaemonSet','metadata':{'name':'fsb-gpu-device-plugin','namespace':'kube-system'},'spec':{'selector':{'matchLabels':{'app':'fsb-gpu-device-plugin'}},'template':{'metadata':{'labels':{'app':'fsb-gpu-device-plugin'}},'spec':{'runtimeClassName':a.nvidia_runtime_class,'tolerations':[{'operator':'Exists'}],'containers':[{'name':'plugin','image':'nvcr.io/nvidia/k8s-device-plugin:v0.17.1','imagePullPolicy':'Never','env':[{'name':'NVIDIA_VISIBLE_DEVICES','value':'all'},{'name':'NVIDIA_DRIVER_CAPABILITIES','value':'compute,utility'}],'args':['--mig-strategy=none','--device-id-strategy=uuid','--device-list-strategy=cdi-cri','--fail-on-init-error=true'],'securityContext':{'allowPrivilegeEscalation':False,'capabilities':{'drop':['ALL']}},'volumeMounts':[{'name':'device-plugin','mountPath':'/var/lib/kubelet/device-plugins'}]}],'volumes':[{'name':'device-plugin','hostPath':{'path':str(Path(a.kubelet_root)/'device-plugins'),'type':'Directory'}}]}}}}
-# Refuse a duplicate NVIDIA allocator before installing this disposable plugin.
-existing=json.loads(run(['-n','kube-system','get','daemonsets','-o','json']))
-for item in existing['items']:
- for c in item['spec']['template']['spec'].get('containers',[]):
-  if 'k8s-device-plugin' in c.get('image','') and item['metadata']['name']!='fsb-gpu-device-plugin':raise RuntimeError('Existing NVIDIA plugin found; inspect/use its exclusive UUID configuration instead of deploying a second allocator')
 run(['apply','-f','-'],plugin)
 print('Stack submitted. Wait for deployments, Janitor, device plugin and two allocatable GPUs; then run cluster-smoke.py.')

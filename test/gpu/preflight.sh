@@ -20,7 +20,7 @@ cat /proc/self/status | sed -n '/^Cap/p; /^Seccomp/p; /^NoNewPrivs/p'
 findmnt /sys/fs/cgroup || true
 if command -v nvidia-smi >/dev/null; then
     nvidia-smi -L || true
-    nvidia-smi --query-gpu=uuid,name,driver_version,memory.total --format=csv > "$out/gpus.csv" || failures=$((failures + 1))
+    nvidia-smi --query-gpu=uuid,name,driver_version,memory.total,compute_mode,pci.bus_id --format=csv > "$out/gpus.csv" || failures=$((failures + 1))
     cat "$out/gpus.csv"
     nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv > "$out/compute-apps.csv" || failures=$((failures + 1))
 fi
