@@ -5,6 +5,11 @@ import glob
 import json
 import os
 import time
+import signal
+import sys
+
+# Cooperate with the runtime grace period; Python PID 1 otherwise ignores default SIGTERM.
+signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 
 # Do not let an image's CUDA_VISIBLE_DEVICES hide an accidentally exposed card.
 os.environ.pop('CUDA_VISIBLE_DEVICES', None)

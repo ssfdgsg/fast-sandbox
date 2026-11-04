@@ -5,6 +5,11 @@ import glob
 import json
 import os
 import time
+import signal
+import sys
+
+# Cooperate with the runtime grace period; Python PID 1 otherwise ignores default SIGTERM.
+signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--expect-count', type=int, default=1)

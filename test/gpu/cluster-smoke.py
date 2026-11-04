@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,7 @@ p.add_argument('--fixtures', type=Path, required=True)
 p.add_argument('--output', type=Path, required=True)
 p.add_argument('--include-faults', action='store_true')
 p.add_argument('--include-capacity', action='store_true')
+p.add_argument('--resume-after-basics', action='store_true', help='Resume fault/capacity gates in this runner-owned namespace after validating its live probes')
 p.add_argument('--timeout', type=int, default=180)
 p.add_argument('--budget-seconds', type=int, default=1200)
 a = p.parse_args()
@@ -100,6 +102,22 @@ def task_pids():
     return {parts[0]: parts[1] for line in lines if len(parts := line.split()) >= 2}
 
 
+def kill_fastlet_process(pod):
+    assert not pod['spec'].get('hostPID'), 'Refuse a hostPID target'
+    status = next(x for x in pod['status']['containerStatuses'] if x['name'] == 'fastlet')
+    container_id = status['containerID'].removeprefix('containerd://')
+    pid = int(task_pids()[container_id])
+    # Signal from the ancestor (host) PID namespace. Linux protects namespace
+    # PID 1 against a SIGKILL sent by a process inside the same namespace.
+    fd = os.pidfd_open(pid)
+    try:
+        assert container_id in Path(f'/proc/{pid}/cgroup').read_text(), 'Target PID no longer belongs to the selected Fastlet container'
+        assert b'fastlet' in Path(f'/proc/{pid}/cmdline').read_bytes(), 'Unexpected target process'
+        signal.pidfd_send_signal(fd, signal.SIGKILL)
+    finally:
+        os.close(fd)
+
+
 def sandbox_probe(name, expected, fresh=False):
     def check():
         sb = get('sandbox', name)
@@ -157,47 +175,56 @@ try:
     nodes = json.loads(cmd(['kubectl', '--request-timeout=15s', 'get', 'nodes', '-o', 'json']).stdout)['items']
     assert len(nodes) == 1, 'This runner requires a dedicated single-node cluster and reads that node journal locally'
     assert int(nodes[0].get('status', {}).get('allocatable', {}).get('nvidia.com/gpu', 0)) == 2, 'Exactly two exclusive allocatable GPUs are required for the third-Pod exhaustion gate'
-    # Creating the namespace, rather than applying, prevents touching another test run.
-    k('create', '-f', str(a.fixtures / 'namespace.json'))
-    owned = True
-    apply_file('gpu-pool')
-    pods = wait_pool('gpu-test-pool', 1)
-    gpu_container = next(x for x in pods[0]['spec']['containers'] if x['name'] == 'fastlet')
-    for field in ['requests', 'limits']:
-        assert str(gpu_container['resources'][field]['nvidia.com/gpu']) == '2'
-    gate('Kubernetes reserves exactly two GPUs for the two-slot Fastlet')
-    apply_file('gpu-sandbox-1')
-    apply_file('gpu-sandbox-2')
-    s1, v1 = sandbox_probe('gpu-test-1', 1)
-    s2, v2 = sandbox_probe('gpu-test-2', 1)
-    assert set(v1['uuids']).isdisjoint(v2['uuids'])
-    gate('Two Sandboxes execute CUDA on distinct physical allocated UUIDs', [v1, v2])
-    apply_file('gpu-sandbox-3')
-    for _ in range(15):
-        overflow = get('sandbox', 'gpu-test-3')
-        assert overflow.get('status', {}).get('runtime', {}).get('state') != 'Ready'
-        overflow_uid = overflow['metadata']['uid']
-        assert overflow_uid not in task_pids()
-        assert all(x['owner']['sandboxUid'] != overflow_uid for x in journal().values())
-        time.sleep(1)
-    gate('Overflow creates no task or GPU lease while all slots are occupied')
-    delete_sandbox('gpu-test-1')
-    s3, v3 = sandbox_probe('gpu-test-3', 1)
-    assert v3['uuids'] == v1['uuids']
-    gate('Deleting a Sandbox restores capacity and reuses only the freed GPU')
-    apply_file('cpu-pool')
-    wait_pool('cpu-test-pool', 1)
-    apply_file('cpu-sandbox')
-    sandbox_probe('cpu-test', 0)
-    gate('CPU Sandbox has no usable GPU or per-card device node')
+    if a.resume_after_basics:
+        namespace = get('namespace', ns)
+        assert namespace['metadata'].get('labels', {}).get('fsb-gpu-test') == 'true', 'Refuse an unrelated namespace'
+        owned = True
+        s2, v2 = sandbox_probe('gpu-test-2', 1, fresh=True)
+        s3, v3 = sandbox_probe('gpu-test-3', 1, fresh=True)
+        assert set(v2['uuids']).isdisjoint(v3['uuids'])
+        sandbox_probe('cpu-test', 0, fresh=True)
+        gate('Resumed namespace revalidated with fresh CUDA and CPU isolation probes')
+    else:
+        # Creating the namespace, rather than applying, prevents touching another test run.
+        k('create', '-f', str(a.fixtures / 'namespace.json'))
+        owned = True
+        apply_file('gpu-pool')
+        pods = wait_pool('gpu-test-pool', 1)
+        gpu_container = next(x for x in pods[0]['spec']['containers'] if x['name'] == 'fastlet')
+        for field in ['requests', 'limits']:
+            assert str(gpu_container['resources'][field]['nvidia.com/gpu']) == '2'
+        gate('Kubernetes reserves exactly two GPUs for the two-slot Fastlet')
+        apply_file('gpu-sandbox-1')
+        apply_file('gpu-sandbox-2')
+        s1, v1 = sandbox_probe('gpu-test-1', 1)
+        s2, v2 = sandbox_probe('gpu-test-2', 1)
+        assert set(v1['uuids']).isdisjoint(v2['uuids'])
+        gate('Two Sandboxes execute CUDA on distinct physical allocated UUIDs', [v1, v2])
+        apply_file('gpu-sandbox-3')
+        for _ in range(15):
+            overflow = get('sandbox', 'gpu-test-3')
+            assert overflow.get('status', {}).get('runtime', {}).get('state') != 'Ready'
+            overflow_uid = overflow['metadata']['uid']
+            assert overflow_uid not in task_pids()
+            assert all(x['owner']['sandboxUid'] != overflow_uid for x in journal().values())
+            time.sleep(1)
+        gate('Overflow creates no task or GPU lease while all slots are occupied')
+        delete_sandbox('gpu-test-1')
+        s3, v3 = sandbox_probe('gpu-test-3', 1)
+        assert v3['uuids'] == v1['uuids']
+        gate('Deleting a Sandbox restores capacity and reuses only the freed GPU')
+        apply_file('cpu-pool')
+        wait_pool('cpu-test-pool', 1)
+        apply_file('cpu-sandbox')
+        sandbox_probe('cpu-test', 0)
+        gate('CPU Sandbox has no usable GPU or per-card device node')
     if a.include_faults:
         pod = wait_pool('gpu-test-pool', 1)[0]
         assert not pod['spec'].get('hostPID'), 'Refuse PID-1 fault in a hostPID Pod'
         name, old_uid = pod['metadata']['name'], pod['metadata']['uid']
         old_restarts = next(x for x in pod['status']['containerStatuses'] if x['name'] == 'fastlet')['restartCount']
         before = task_pids()
-        # PID 1 is only the Fastlet process inside its own PID namespace.
-        k('exec', name, '-c', 'fastlet', '--', 'sh', '-c', 'kill -KILL 1', allow=True)
+        kill_fastlet_process(pod)
         def restarted():
             pod = get('pod', name)
             statuses = pod.get('status', {}).get('containerStatuses', [])
@@ -208,7 +235,7 @@ try:
         after = task_pids()
         for uid in [s2['metadata']['uid'], s3['metadata']['uid']]:
             assert uid in before and after.get(uid) == before[uid], (uid, before, after)
-        gate('Actual Fastlet SIGKILL restart preserves exact GPU task PIDs and allocation')
+        gate('Actual Fastlet SIGKILL restart preserves exact GPU task PIDs and allocation', {'pod_uid': old_uid, 'sandbox_task_pids': {uid: {'before': before[uid], 'after': after[uid]} for uid in [s2['metadata']['uid'], s3['metadata']['uid']]}})
         k('delete', 'pod', name, '--wait=false')
         def replaced():
             return [x for x in pool_pods('gpu-test-pool') if x['metadata']['uid'] != old_uid and ready(x)]

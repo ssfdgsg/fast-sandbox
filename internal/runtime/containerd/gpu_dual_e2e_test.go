@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	tasksapi "github.com/containerd/containerd/api/services/tasks/v1"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/images/archive"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/stretchr/testify/require"
 
@@ -86,7 +89,7 @@ func newGPUHardwareFixture(t *testing.T, ids []string, root string, count int) *
 		} else if len(tasks.Tasks) != 0 {
 			t.Errorf("leaked %d tasks", len(tasks.Tasks))
 		}
-		if err := driver.client.ImageService().Delete(namespaces.WithNamespace(c, ns), f.image); err != nil {
+		if err := driver.client.ImageService().Delete(namespaces.WithNamespace(c, ns), f.image, images.SynchronousDelete()); err != nil {
 			t.Errorf("image reference cleanup: %v", err)
 		}
 		if err := driver.client.NamespaceService().Delete(c, ns); err != nil {
@@ -96,10 +99,7 @@ func newGPUHardwareFixture(t *testing.T, ids []string, root string, count int) *
 			t.Errorf("close: %v", err)
 		}
 	})
-	source, err := driver.client.GetImage(namespaces.WithNamespace(ctx, "k8s.io"), f.image)
-	require.NoError(t, err, "preload the image in k8s.io")
-	_, err = driver.client.ImageService().Create(namespaces.WithNamespace(ctx, ns), source.Metadata())
-	require.NoError(t, err)
+	copyGPUHardwareImage(t, driver, ctx, ns, f.image)
 	if count > 0 {
 		f.setManager(t, count)
 	}
@@ -256,4 +256,25 @@ func TestGPUContainerdMultiFastletCUDA(t *testing.T) {
 	records, err := a.manager.Records()
 	require.NoError(t, err)
 	require.Empty(t, records)
+}
+
+// A new image reference alone does not make content visible in an isolated
+// containerd namespace (notably containerd 1.7). Import the existing local blobs.
+func copyGPUHardwareImage(t *testing.T, driver *Driver, ctx context.Context, namespace, image string) {
+	t.Helper()
+	sourceCtx := namespaces.WithNamespace(ctx, "k8s.io")
+	_, err := driver.client.GetImage(sourceCtx, image)
+	require.NoError(t, err, "preload image in k8s.io")
+	reader, writer := io.Pipe()
+	exported := make(chan error, 1)
+	go func() {
+		err := driver.client.Export(sourceCtx, writer, archive.WithImage(driver.client.ImageService(), image))
+		_ = writer.CloseWithError(err)
+		exported <- err
+	}()
+	_, importErr := driver.client.Import(namespaces.WithNamespace(ctx, namespace), reader)
+	_ = reader.CloseWithError(importErr)
+	exportErr := <-exported
+	require.NoError(t, exportErr, "export existing local image")
+	require.NoError(t, importErr, "import image content into isolated test namespace")
 }

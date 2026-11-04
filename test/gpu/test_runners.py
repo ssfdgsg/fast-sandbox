@@ -8,6 +8,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 KIT = Path(__file__).parent
 
@@ -45,6 +46,22 @@ class RunnerRegressionTest(unittest.TestCase):
             scope['cmd'] = lambda *args, **kwargs: types.SimpleNamespace(stdout='FSB_GPU_DRIVER_OK ' + json.dumps({'uuids': ['GPU-other']}))
             with self.assertRaises(AssertionError):
                 scope['sandbox_probe']('test', 1, fresh=True)
+
+    def test_host_kill_requires_exact_container_cgroup_and_uses_pidfd(self):
+        scope = runner_functions()
+        scope['task_pids'] = lambda: {'container-id': '1234'}
+        pod = {'spec': {}, 'status': {'containerStatuses': [{'name': 'fastlet', 'containerID': 'containerd://container-id'}]}}
+        scope['Path'] = lambda name: types.SimpleNamespace(read_text=lambda: '/cri-containerd-container-id.scope', read_bytes=lambda: b'/workspace/fastlet')
+        with mock.patch.object(scope['os'], 'pidfd_open', return_value=91, create=True) as opened, mock.patch.object(scope['os'], 'close') as closed, mock.patch.object(scope['signal'], 'pidfd_send_signal', create=True) as sent:
+            scope['kill_fastlet_process'](pod)
+            opened.assert_called_once_with(1234)
+            sent.assert_called_once_with(91, scope['signal'].SIGKILL)
+            closed.assert_called_once_with(91)
+            sent.reset_mock()
+            scope['Path'] = lambda name: types.SimpleNamespace(read_text=lambda: '/unrelated-container.scope', read_bytes=lambda: b'/workspace/fastlet')
+            with self.assertRaises(AssertionError):
+                scope['kill_fastlet_process'](pod)
+            sent.assert_not_called()
 
     def test_existing_allocator_outside_kube_system_blocks_before_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:

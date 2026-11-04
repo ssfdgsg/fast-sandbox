@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/stretchr/testify/require"
 
@@ -52,14 +53,11 @@ func TestGPUContainerdCUDA(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, driver.SetGPUManager(manager))
 	// Reuse an explicitly pre-pulled image without another registry resolution.
-	source, err := driver.client.GetImage(namespaces.WithNamespace(ctx, "k8s.io"), image)
-	require.NoError(t, err, "pre-pull FSB_GPU_E2E_IMAGE into the k8s.io containerd namespace")
-	_, err = driver.client.ImageService().Create(namespaces.WithNamespace(ctx, namespace), source.Metadata())
-	require.NoError(t, err)
+	copyGPUHardwareImage(t, driver, ctx, namespace, image)
 	uid := namespace + "-sandbox"
 	input := &fastletapi.EnsureSandboxInput{Sandbox: fastletapi.RuntimeSandboxConfig{
 		Identity: fastletapi.SandboxIdentity{SandboxUID: uid, Name: uid, Namespace: "gpu-e2e", FastletPodUID: namespace, RuntimeInstanceID: uid + "-instance", InstanceGeneration: 1, AssignmentAttempt: 1, RouteGeneration: 1},
-		Desired:  fastletapi.SandboxDesiredSpec{Image: image, RuntimeProfileHash: "gpu-e2e-profile", ResourceProfileHash: "gpu-e2e-resource", Command: []string{"python", "-c", `import torch,time; assert torch.cuda.is_available(); assert torch.cuda.device_count()==1; x=torch.ones((32,32),device='cuda'); y=x@x; torch.cuda.synchronize(); assert y.sum().item()==32768; print('FSB_GPU_CUDA_OK',torch.cuda.get_device_name(0),flush=True); time.sleep(240)`}},
+		Desired:  fastletapi.SandboxDesiredSpec{Image: image, RuntimeProfileHash: "gpu-e2e-profile", ResourceProfileHash: "gpu-e2e-resource", Command: []string{"python", "-c", `import torch,time,signal,sys; signal.signal(signal.SIGTERM,lambda *_:sys.exit(0)); assert torch.cuda.is_available(); assert torch.cuda.device_count()==1; x=torch.ones((32,32),device='cuda'); y=x@x; torch.cuda.synchronize(); assert y.sum().item()==32768; print('FSB_GPU_CUDA_OK',torch.cuda.get_device_name(0),flush=True); time.sleep(240)`}},
 		Limits:   fastletapi.SandboxRuntimeLimits{CPU: "1", Memory: "4Gi", PIDs: 512},
 	}}
 	t.Cleanup(func() {
@@ -69,7 +67,7 @@ func TestGPUContainerdCUDA(t *testing.T) {
 			t.Errorf("GPU runtime cleanup failed: %v", err)
 		}
 		imageCtx := namespaces.WithNamespace(cleanupCtx, namespace)
-		if err := driver.client.ImageService().Delete(imageCtx, image); err != nil {
+		if err := driver.client.ImageService().Delete(imageCtx, image, images.SynchronousDelete()); err != nil {
 			t.Errorf("remove test image reference: %v", err)
 		}
 		if err := driver.client.NamespaceService().Delete(cleanupCtx, namespace); err != nil {
