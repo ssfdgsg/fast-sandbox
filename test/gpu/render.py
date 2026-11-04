@@ -10,12 +10,13 @@ p.add_argument('--fastlet-image', default='fast-sandbox/fastlet:dev')
 p.add_argument('--namespace', default='fsb-gpu-e2e')
 p.add_argument('--slots', type=int, default=1)
 p.add_argument('--gpus-per-sandbox', type=int, default=1)
+p.add_argument('--probe', choices=['torch', 'driver'], default='torch')
 p.add_argument('--pod-pull-policy', choices=['Never', 'IfNotPresent', 'Always'], default='Never')
 p.add_argument('--output', type=Path, required=True)
 a = p.parse_args()
 assert a.slots > 0 and a.gpus_per_sandbox > 0
 a.output.mkdir(parents=True, exist_ok=True)
-probe = Path(__file__).with_name('cuda-probe.py').read_text()
+probe = Path(__file__).with_name('cuda-driver-probe.py' if a.probe == 'driver' else 'cuda-probe.py').read_text()
 
 def save(name, obj):
     (a.output / (name + '.json')).write_text(json.dumps(obj, indent=2) + '\n')

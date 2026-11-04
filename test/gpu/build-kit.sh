@@ -8,7 +8,7 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 case "$out/" in "$kit/"*) echo 'Output must be outside the source kit.' >&2; exit 2;; esac
 mkdir -p "$out/gpu-test-kit"
-cp "$kit/"*.sh "$kit/"*.py "$kit/PLAN.md" "$kit/REPORT.md" "$kit/Dockerfile.p40" "$out/gpu-test-kit/"
+cp "$kit/"*.sh "$kit/"*.py "$kit/"*.md "$kit/"Dockerfile.* "$out/gpu-test-kit/"
 cd "$repo"
 env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c ./internal/runtime/containerd -o "$out/gpu-test-kit/containerd-gpu.test"
 python3 - "$out/gpu-test-kit/source.json" <<'PY'
@@ -31,7 +31,7 @@ PY
 python3 - "$out/gpu-test-kit" <<'PY'
 import hashlib, pathlib, sys
 root = pathlib.Path(sys.argv[1])
-(root / 'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.name + '\n' for p in sorted(root.iterdir()) if p.is_file() and p.name != 'SHA256SUMS'))
+(root / 'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + str(p.relative_to(root)) + '\n' for p in sorted(root.rglob('*')) if p.is_file() and p.name != 'SHA256SUMS'))
 PY
 tar -C "$out" -czf "$out/gpu-test-kit-linux-amd64.tar.gz" gpu-test-kit
 printf 'Prepared: %s/gpu-test-kit-linux-amd64.tar.gz\n' "$out"

@@ -1,0 +1,13 @@
+# Runtime-equivalent tools with locally precompiled binaries; no Go compiler on the rented host.
+FROM ubuntu:22.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates coreutils e2fsprogs iproute2 iptables mount tcpdump util-linux \
+    libaio1 libcurl4 libssl3 libzstd1 \
+    && rm -rf /var/lib/apt/lists/*
+ARG COMPONENT
+COPY bin/ /workspace/
+RUN mkdir -p /opt/fast-sandbox/bin && cp /workspace/sandbox-init /opt/fast-sandbox/bin/sandbox-init
+WORKDIR /workspace
+ENV FSB_COMPONENT=${COMPONENT}
+COPY entrypoint.sh /workspace/entrypoint.sh
+ENTRYPOINT ["/workspace/entrypoint.sh"]

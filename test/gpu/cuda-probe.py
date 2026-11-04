@@ -45,7 +45,10 @@ if args.expect_count:
         resolved_uuid = None
         if nvml is not None:
             handle = ctypes.c_void_p()
-            if nvml.nvmlDeviceGetHandleByIndex(ordinal, ctypes.byref(handle)) == 0:
+            pci = ctypes.create_string_buffer(32)
+            # NVML and CUDA ordinals need not identify the same physical device.
+            if (driver.cuDeviceGetPCIBusId(pci, len(pci), dev) == 0
+                    and nvml.nvmlDeviceGetHandleByPciBusId_v2(pci.value, ctypes.byref(handle)) == 0):
                 buf = ctypes.create_string_buffer(96)
                 if nvml.nvmlDeviceGetUUID(handle, buf, 96) == 0:
                     resolved_uuid = buf.value.decode('utf-8')
