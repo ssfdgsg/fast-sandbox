@@ -15,7 +15,7 @@ ctr --address "$socket" -n k8s.io images ls > "$out/images.txt"
 ctr --address "$socket" -n k8s.io images ls -q | grep -Fx -- "$FSB_GPU_E2E_IMAGE" > "$out/selected-image.txt"
 python3 - "$out/invocation.json" <<'PY'
 import json, os, sys
-keys = ('FSB_GPU_E2E_DEVICES', 'FSB_GPU_E2E_IMAGE', 'FSB_GPU_E2E_SOCKET', 'FSB_GPU_E2E_SNAPSHOTTER')
+keys = ('FSB_GPU_E2E_DEVICES', 'FSB_GPU_E2E_IMAGE', 'FSB_GPU_E2E_SOCKET', 'FSB_GPU_E2E_SNAPSHOTTER', 'FSB_GPU_E2E_REUSE_SOURCE_NAMESPACE')
 with open(sys.argv[1], 'w') as f:
     json.dump({k: os.environ.get(k) for k in keys}, f, indent=2)
 PY

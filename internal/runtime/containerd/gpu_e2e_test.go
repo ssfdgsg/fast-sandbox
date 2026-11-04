@@ -38,25 +38,32 @@ func TestGPUContainerdCUDA(t *testing.T) {
 	if snapshotter == "" {
 		snapshotter = "overlayfs"
 	}
-	namespace := fmt.Sprintf("fsb-gpu-e2e-%d", time.Now().UnixNano())
+	instance := fmt.Sprintf("fsb-gpu-e2e-%d", time.Now().UnixNano())
+	namespace := instance
+	sharedImage := os.Getenv("FSB_GPU_E2E_REUSE_SOURCE_NAMESPACE") == "1"
+	if sharedImage {
+		namespace = "k8s.io"
+	}
 	t.Setenv("POD_UID", "")
 	t.Setenv("POD_NAME", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	driver := newWithConfig(apiv1alpha2.RuntimeContainer, "gpu-e2e-profile", RuntimeConfig{Handler: "io.containerd.runc.v2", Namespace: namespace, Snapshotter: snapshotter})
 	require.NoError(t, driver.Initialize(ctx, socket))
-	driver.fastletPodUID = namespace
+	driver.fastletPodUID = instance
 	driver.SetNamespace("gpu-e2e")
 	ids := strings.Split(devices, ",")
 	root := t.TempDir()
-	manager, err := gpu.New(root, ids, 1, namespace, namespace, socket)
+	manager, err := gpu.New(root, ids, 1, instance, namespace, socket)
 	require.NoError(t, err)
 	require.NoError(t, driver.SetGPUManager(manager))
 	// Reuse an explicitly pre-pulled image without another registry resolution.
-	copyGPUHardwareImage(t, driver, ctx, namespace, image)
-	uid := namespace + "-sandbox"
+	if !sharedImage {
+		copyGPUHardwareImage(t, driver, ctx, namespace, image)
+	}
+	uid := instance + "-sandbox"
 	input := &fastletapi.EnsureSandboxInput{Sandbox: fastletapi.RuntimeSandboxConfig{
-		Identity: fastletapi.SandboxIdentity{SandboxUID: uid, Name: uid, Namespace: "gpu-e2e", FastletPodUID: namespace, RuntimeInstanceID: uid + "-instance", InstanceGeneration: 1, AssignmentAttempt: 1, RouteGeneration: 1},
+		Identity: fastletapi.SandboxIdentity{SandboxUID: uid, Name: uid, Namespace: "gpu-e2e", FastletPodUID: instance, RuntimeInstanceID: uid + "-instance", InstanceGeneration: 1, AssignmentAttempt: 1, RouteGeneration: 1},
 		Desired:  fastletapi.SandboxDesiredSpec{Image: image, RuntimeProfileHash: "gpu-e2e-profile", ResourceProfileHash: "gpu-e2e-resource", Command: []string{"python", "-c", `import torch,time,signal,sys; signal.signal(signal.SIGTERM,lambda *_:sys.exit(0)); assert torch.cuda.is_available(); assert torch.cuda.device_count()==1; x=torch.ones((32,32),device='cuda'); y=x@x; torch.cuda.synchronize(); assert y.sum().item()==32768; print('FSB_GPU_CUDA_OK',torch.cuda.get_device_name(0),flush=True); time.sleep(240)`}},
 		Limits:   fastletapi.SandboxRuntimeLimits{CPU: "1", Memory: "4Gi", PIDs: 512},
 	}}
@@ -66,12 +73,14 @@ func TestGPUContainerdCUDA(t *testing.T) {
 		if err := driver.DeleteSandbox(cleanupCtx, uid); err != nil {
 			t.Errorf("GPU runtime cleanup failed: %v", err)
 		}
-		imageCtx := namespaces.WithNamespace(cleanupCtx, namespace)
-		if err := driver.client.ImageService().Delete(imageCtx, image, images.SynchronousDelete()); err != nil {
-			t.Errorf("remove test image reference: %v", err)
-		}
-		if err := driver.client.NamespaceService().Delete(cleanupCtx, namespace); err != nil {
-			t.Errorf("remove test namespace: %v", err)
+		if !sharedImage {
+			imageCtx := namespaces.WithNamespace(cleanupCtx, namespace)
+			if err := driver.client.ImageService().Delete(imageCtx, image, images.SynchronousDelete()); err != nil {
+				t.Errorf("remove test image reference: %v", err)
+			}
+			if err := driver.client.NamespaceService().Delete(cleanupCtx, namespace); err != nil {
+				t.Errorf("remove test namespace: %v", err)
+			}
 		}
 		_ = driver.Close()
 		_ = os.Remove(filepath.Join("/var/log/fast-sandbox", uid+".log"))
@@ -88,7 +97,7 @@ func TestGPUContainerdCUDA(t *testing.T) {
 	// Drop/reload the journal manager as a Fastlet process restart would; retain the task.
 	require.NoError(t, manager.Close())
 	driver.gpuManager = nil
-	manager, err = gpu.New(root, ids, 1, namespace, namespace, socket)
+	manager, err = gpu.New(root, ids, 1, instance, namespace, socket)
 	require.NoError(t, err)
 	require.NoError(t, driver.SetGPUManager(manager))
 	managed, err := driver.ListManagedSandboxes(ctx)
@@ -103,7 +112,7 @@ func TestGPUContainerdCUDA(t *testing.T) {
 	require.Empty(t, manager.Leases())
 	require.True(t, manager.Available())
 	// Confirm no task/container remains before accepting successful reclamation.
-	containers, err := driver.client.Containers(namespaces.WithNamespace(ctx, namespace))
+	containers, err := driver.ListManagedSandboxes(ctx)
 	require.NoError(t, err)
 	require.Empty(t, containers)
 }

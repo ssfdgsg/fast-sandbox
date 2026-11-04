@@ -11,6 +11,7 @@ mkdir -p "$out/gpu-test-kit"
 cp "$kit/"*.sh "$kit/"*.py "$kit/"*.md "$kit/"Dockerfile.* "$out/gpu-test-kit/"
 cd "$repo"
 env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c ./internal/runtime/containerd -o "$out/gpu-test-kit/containerd-gpu.test"
+env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$out/gpu-test-kit/gpu-matrix-client" ./test/gpu/cmd/matrix-client
 python3 - "$out/gpu-test-kit/source.json" <<'PY'
 import hashlib, json, pathlib, subprocess, sys
 names = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard']).split(b'\0')
