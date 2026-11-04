@@ -221,7 +221,7 @@ func (r *Driver) CreateSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	if r.config.NeedsTTY {
 		cioOpts = append(cioOpts, cio.WithTerminal)
 	}
-	cioOpts = append(cioOpts, cio.WithStreams(nil, logFile, logFile))
+	cioOpts = append(cioOpts, cio.WithFIFODir(r.fifoDir()), cio.WithStreams(nil, logFile, logFile))
 
 	var taskOpts []containerd.NewTaskOpts
 	if r.config.RuntimePath != "" {
@@ -976,4 +976,14 @@ func envMapToSlice(env map[string]string) []string {
 
 func snapShotName(containerID string) string {
 	return containerID + "-snapshot"
+}
+
+// fifoDir matches the same absolute path mounted from the resolved containerd
+// run directory; the node shim must see the paths sent by the Fastlet client.
+func (r *Driver) fifoDir() string {
+	socket := r.socketPath
+	if socket == "" {
+		socket = "/run/containerd/containerd.sock"
+	}
+	return filepath.Join(filepath.Dir(socket), "fifo")
 }

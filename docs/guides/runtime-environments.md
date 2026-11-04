@@ -32,13 +32,7 @@ environments:
         configPath: /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml
 ```
 
-An environment describes one node installation: the containerd endpoint and
-namespace, its default snapshotter and state root, the kubelet root, and the
-node selector used to place Fastlet Pods. A runtime binding records only the
-exceptions required by that runtime. For example, `kata-fc` shares the same
-containerd installation as the other runtimes but overrides the default
-`overlayfs` snapshotter with `blockfile` and selects a Firecracker-specific Kata
-configuration.
+An environment describes one node installation: the containerd endpoint and namespace, its default snapshotter and state root, the kubelet root, and the node selector used to place Fastlet Pods. Task log FIFOs use `<containerd socket directory>/fifo` so Fastlet and the node shim resolve the same absolute path. When adapting NodeJanitor manifests to a non-default endpoint, update both hostPath and container mountPath for the socket and FIFO directory. A runtime binding records only the exceptions required by that runtime. For example, `kata-fc` shares the same containerd installation as the other runtimes but overrides the default `overlayfs` snapshotter with `blockfile` and selects a Firecracker-specific Kata configuration.
 
 The configuration only binds an installed runtime. It does not install Kata or
 gVisor and it does not edit the upstream runtime files. See
